@@ -29,7 +29,7 @@ If you are on desktop and plan to use the Qt frontend, you *must* install Qt 6, 
 
 * On Linux, *BSD and macOS, this can be done by the package manager
   * If you wish to use Qt Creator, append `qtcreator` or `qt-creator` to the commands seen below.
-* MSVC/clang-cl users on Windows must install through the official [Qt](https://www.qt.io/download-qt-installer-oss) installer
+* The Windows MSVC preset downloads bundled Qt automatically. If you disable bundled Qt, install a matching kit through the official [Qt installer](https://www.qt.io/download-qt-installer-oss).
 * Linux and macOS users may choose to use the installer as well.
 * MSYS2 can also install Qt 6 via the package manager
 
@@ -325,29 +325,12 @@ sudo pkgin install git cmake autoconf build-essential libusb-1 nasm gcc13
 <details>
 <summary>MSYS2</summary>
 
-* Open the `MSYS2 MinGW 64-bit` shell (`mingw64.exe`)
-* Download and install all dependencies:
+Use the **UCRT64** shell for a native x86_64 Windows build. The package commands
+and build helper are in [Build.md](Build.md#msys2).
 
-```sh
-BASE="git make autoconf libtool automake-wrapper jq patch"
-MINGW="qt6-base qt6-charts qt6-tools qt6-translations qt6-svg cmake toolchain clang python-pip openssl vulkan-memory-allocator vulkan-devel glslang boost fmt lz4 nlohmann-json zlib zstd enet opus libusb openssl SDL3"
-# Either x86_64 or clang-aarch64 (Windows on ARM)
-packages="$BASE"
-for pkg in $MINGW; do
-    packages="$packages mingw-w64-x86_64-$pkg"
-    #packages="$packages mingw-w64-clang-aarch64-$pkg"
-done
-pacman -Syuu --needed --noconfirm $packages
-```
-
-* Notes:
-  * Using `qt6-static` is possible as well, provided you build with `-DYUZU_STATIC_BUILD=ON`.
-  * Other environments are entirely untested, but should theoretically work provided you install all the necessary packages.
-  * GCC is proven to work better with the MinGW environment. On ARM, only Clang is available through the CLANGARM64 environment, so use that until a GNU ARM environment is available.
-  * Add `qt-creator` to the `MINGW` variable to install Qt Creator. You can then create a Start Menu shortcut to the MinGW Qt Creator by running `powershell "\$s=(New-Object -COM WScript.Shell).CreateShortcut('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Qt Creator.lnk');\$s.TargetPath='C:\\msys64\\mingw64\\bin\\qtcreator.exe';\$s.Save()"` in Git Bash or MSYS2.
-* Add MinGW binaries to the PATH if they aren't already:
-  * `echo 'PATH=/mingw64/bin:$PATH' >> ~/.bashrc`
-  * or `echo 'PATH=/mingw64/bin:$PATH' >> ~/.zshrc`
+Keep the compiler and libraries in the same MSYS2 environment. The native MSYS2
+preset uses that environment's FFmpeg package as well, rather than mixing it
+with prebuilt static libraries from another runtime.
 
 [Caveats](./Caveats.md#msys2).
 

@@ -5,6 +5,20 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_library(core STATIC
+    file_sys/private_server_patches.cpp
+    file_sys/private_server_patches.h
+    hle/service/acc/switchnet_account.cpp
+    hle/service/acc/switchnet_account.h
+    hle/service/bcat/backend/grid0_backend.cpp
+    hle/service/bcat/backend/grid0_backend.h
+    hle/service/friend/grid0_friends.cpp
+    hle/service/friend/grid0_friends.h
+    hle/service/sockets/deferred_poll_waker.cpp
+    hle/service/sockets/deferred_poll_waker.h
+    hle/service/sockets/private_server.cpp
+    hle/service/sockets/private_server.h
+    hle/service/ssl/switchnet_ca.h
+
     arm/arm_interface.cpp
     arm/arm_interface.h
     arm/debug.cpp

@@ -292,11 +292,16 @@ if (ANDROID AND YUZU_DOWNLOAD_ANDROID_VVL)
         DESTINATION "${vvl_lib_path}")
 endif()
 
-if(EXISTS ${PROJECT_SOURCE_DIR}/hooks/pre-commit AND NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
+option(EDEN_INSTALL_GIT_HOOKS "Install development Git hooks when configuring" ON)
+if(EDEN_INSTALL_GIT_HOOKS AND EXISTS ${PROJECT_SOURCE_DIR}/hooks/pre-commit AND NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
     if (EXISTS ${PROJECT_SOURCE_DIR}/.git/)
         message(STATUS "Copying pre-commit hook")
         file(COPY hooks/pre-commit DESTINATION ${PROJECT_SOURCE_DIR}/.git/hooks)
     endif()
+endif()
+
+if (ARCHITECTURE_arm64 AND LINUX)
+    add_link_options("LINKER:-z,max-page-size=65536")
 endif()
 
 if (ARCHITECTURE_arm64 AND (ANDROID OR LINUX))
@@ -617,7 +622,7 @@ if (ENABLE_QT)
     ## Components ##
 
     # Best practice is to ask for all components at once, so they are from the same version
-    set(YUZU_QT_COMPONENTS Core Widgets Charts Concurrent Gui)
+    set(YUZU_QT_COMPONENTS Core Widgets Charts Concurrent Gui Network)
     if (LINUX OR FREEBSD)
         list(APPEND YUZU_QT_COMPONENTS DBus)
         # yes Qt, we get it

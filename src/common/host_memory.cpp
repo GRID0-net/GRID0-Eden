@@ -51,7 +51,11 @@
 
 #endif // ^^^ POSIX ^^^
 
+#include <algorithm>
 #include <mutex>
+#include <map>
+#include <limits>
+#include <boost/container/small_vector.hpp>
 #include <random>
 
 #include "common/alignment.h"
@@ -519,7 +523,9 @@ public:
 
     bool Init() {
         long page_size = sysconf(_SC_PAGESIZE);
-        ASSERT_MSG(page_size == 0x1000, "page size {:#x} is incompatible with 4K paging", page_size);
+        ASSERT_MSG(page_size >= 0x1000 && (page_size & (page_size - 1)) == 0,
+                   "Unsupported host page size {}", page_size);
+        host_page_size = static_cast<size_t>(page_size);
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
         fd = shm_open_anon(O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
@@ -538,7 +544,7 @@ public:
         fd = memfd_create("HostMemory", 0);
 #endif
         bool use_anon = false;
-        if (fd <= 0) {
+        if (fd < 0) {
             LOG_WARNING(Common_Memory, "memfd_create: {}", strerror(errno));
             use_anon = true;
         }
@@ -553,9 +559,9 @@ public:
         if (use_anon) {
             LOG_WARNING(Common_Memory, "Using private mappings instead of shared ones");
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_NOCORE, -1, 0));
-            if (fd > 0) {
-                fd = -1;
+            if (fd >= 0) {
                 close(fd);
+                fd = -1;
             }
         } else {
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, 0));
@@ -569,6 +575,11 @@ public:
         virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
         if (virtual_base == MAP_FAILED) {
             LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
+            return false;
+        }
+        if (host_page_size > PageAlignment &&
+            mprotect(virtual_base, virtual_size, PROT_NONE) != 0) {
+            LOG_CRITICAL(HW_Memory, "Failed to protect the subpage arena: {}", strerror(errno));
             return false;
         }
 #if defined(__linux__)
@@ -593,6 +604,11 @@ public:
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
+
+        if (host_page_size > PageAlignment) {
+            UpdateSubpages(virtual_offset, host_offset, length, perms, SubpageOperation::Map);
+            return;
+        }
 
         // We are removing a placeholder.
         free_manager.AllocateBlock(virtual_base + virtual_offset, length);
@@ -619,6 +635,11 @@ public:
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
 
+        if (host_page_size > PageAlignment) {
+            UpdateSubpages(virtual_offset, 0, length, {}, SubpageOperation::Unmap);
+            return;
+        }
+
         // Merge with any adjacent placeholder mappings.
         auto [merged_pointer, merged_size] =
             free_manager.FreeBlock(virtual_base + virtual_offset, length);
@@ -630,6 +651,14 @@ public:
     void Protect(size_t virtual_offset, size_t length, bool read, bool write, bool execute) {
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
+
+        if (host_page_size > PageAlignment) {
+            const auto permissions = (read ? MemoryPermission::Read : MemoryPermission{}) |
+                                     (write ? MemoryPermission::Write : MemoryPermission{}) |
+                                     (execute ? MemoryPermission::Execute : MemoryPermission{});
+            UpdateSubpages(virtual_offset, 0, length, permissions, SubpageOperation::Protect);
+            return;
+        }
 
         int flags = PROT_NONE;
         if (read) {
@@ -647,6 +676,19 @@ public:
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
     }
 
+    void FlushInstructionCache(size_t offset, size_t length) {
+        std::scoped_lock lock{subpage_mutex};
+        const size_t end = length > std::numeric_limits<size_t>::max() - offset
+                               ? std::numeric_limits<size_t>::max() : offset + length;
+        for (auto it = host_pages.lower_bound(AlignDown(offset, host_page_size));
+             it != host_pages.end() && it->first < end; ++it) {
+            if (it->second.protection & PROT_EXEC) {
+                auto* begin = reinterpret_cast<char*>(reinterpret_cast<uintptr_t>(virtual_base) + it->first);
+                __builtin___clear_cache(begin, begin + host_page_size);
+            }
+        }
+    }
+
     void EnableDirectMappedAddress() {
         virtual_base = nullptr;
     }
@@ -659,6 +701,84 @@ public:
     u8* virtual_map_base{reinterpret_cast<u8*>(MAP_FAILED)};
 
 private:
+    enum class SubpageOperation { Map, Unmap, Protect };
+    struct Subpage {
+        size_t backing_offset{};
+        MemoryPermission permissions{};
+        bool mapped{};
+    };
+    struct HostPage {
+        boost::container::small_vector<Subpage, 4> subpages;
+        std::optional<size_t> native_backing;
+        int protection{PROT_NONE};
+    };
+    size_t host_page_size{PageAlignment};
+    std::map<size_t, HostPage> host_pages;
+    std::mutex subpage_mutex;
+
+    void UpdateSubpages(size_t offset, size_t backing_offset, size_t length,
+                        MemoryPermission permissions, SubpageOperation operation) {
+        std::scoped_lock lock{subpage_mutex};
+        const size_t end = offset + length;
+        while (offset < end) {
+            const size_t page_base = AlignDown(offset, host_page_size);
+            const size_t page_end = (std::min)(end, page_base + host_page_size);
+            auto& page = host_pages[page_base];
+            if (page.subpages.empty()) {
+                page.subpages.resize(host_page_size / PageAlignment);
+            }
+            for (; offset < page_end; offset += PageAlignment, backing_offset += PageAlignment) {
+                auto& subpage = page.subpages[(offset - page_base) / PageAlignment];
+                if (operation == SubpageOperation::Map) {
+                    subpage = {backing_offset, permissions, true};
+                } else if (operation == SubpageOperation::Unmap) {
+                    subpage = {};
+                } else if (subpage.mapped) {
+                    subpage.permissions = permissions;
+                }
+            }
+            RebuildHostPage(page_base, page);
+            if (operation == SubpageOperation::Unmap &&
+                std::none_of(page.subpages.begin(), page.subpages.end(),
+                             [](const auto& subpage) { return subpage.mapped; })) {
+                host_pages.erase(page_base);
+            }
+        }
+    }
+
+    void RebuildHostPage(size_t page_base, HostPage& page) {
+        const size_t backing_offset = page.subpages.front().backing_offset;
+        auto permissions = MemoryPermission::ReadWrite | MemoryPermission::Execute;
+        bool direct = fd >= 0 && backing_offset % host_page_size == 0;
+        for (size_t i = 0; i < page.subpages.size(); ++i) {
+            const auto& subpage = page.subpages[i];
+            direct &= subpage.mapped &&
+                      subpage.backing_offset == backing_offset + i * PageAlignment;
+            permissions = permissions & subpage.permissions;
+        }
+        int protection = PROT_NONE;
+        if (direct) {
+            if (True(permissions & MemoryPermission::Read)) protection |= PROT_READ;
+            if (True(permissions & MemoryPermission::Write)) protection |= PROT_WRITE;
+            if (True(permissions & MemoryPermission::Execute)) protection |= PROT_EXEC;
+        }
+        auto* address = reinterpret_cast<u8*>(reinterpret_cast<uintptr_t>(virtual_base) + page_base);
+        if (direct && page.native_backing != backing_offset) {
+            void* result = mmap(address, host_page_size, protection, MAP_FIXED | MAP_SHARED,
+                                fd, backing_offset);
+            ASSERT_MSG(result != MAP_FAILED, "Subpage mapping failed: {}", strerror(errno));
+            page.native_backing = backing_offset;
+        } else if (page.protection != protection) {
+            const int result = mprotect(address, host_page_size, protection);
+            ASSERT_MSG(result == 0, "Subpage protection failed: {}", strerror(errno));
+        }
+        page.protection = protection;
+        if (direct && (protection & PROT_EXEC)) {
+            auto* begin = reinterpret_cast<char*>(address);
+            __builtin___clear_cache(begin, begin + host_page_size);
+        }
+    }
+
     /// Release all resources in the object
     void Release() {
         if (virtual_map_base != MAP_FAILED) {
@@ -792,6 +912,15 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
     std::memset(backing_base + physical_offset, fill_value, length);
+}
+
+void HostMemory::FlushInstructionCache([[maybe_unused]] size_t virtual_offset,
+                                      [[maybe_unused]] size_t length) {
+#if defined(__linux__) && defined(ARCHITECTURE_arm64)
+    if (impl) {
+        impl->FlushInstructionCache(virtual_offset + virtual_base_offset, length);
+    }
+#endif
 }
 
 void HostMemory::EnableDirectMappedAddress() {

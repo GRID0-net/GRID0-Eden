@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <QMainWindow>
+#include <QPointer>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTimer>
@@ -159,6 +160,8 @@ private:
     constexpr static int MaxMultiplier = 8;
 };
 
+class Grid0FriendsDialog;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -253,6 +256,8 @@ private:
     /// Updates an action's shortcut and text to reflect an updated hotkey from the hotkey registry.
     void LinkActionShortcut(QAction* action, const QString& action_name,
                             const bool tas_allowed = false);
+
+    QPointer<Grid0FriendsDialog> grid0_friends_dialog;
 
     void InitializeWidgets();
     void InitializeDebugWidgets();

@@ -23,6 +23,7 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/private_server_patches.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_cached.h"
@@ -459,7 +460,13 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                 out = patched->ReadAllBytes();
         }
     }
-
+    for (auto& patch : GetPrivateServerPatches(build_id)) {
+        LOG_INFO(Loader, "    - Applying GRID0+ private server patch");
+        const auto patched = PatchIPS(std::make_shared<VectorVfsFile>(out),
+                                      std::make_shared<VectorVfsFile>(std::move(patch)));
+        if (patched != nullptr)
+            out = patched->ReadAllBytes();
+    }
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }
@@ -483,8 +490,8 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     auto patch_dirs = load_dir->GetSubdirectories();
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
-
-    return !CollectPatches(patch_dirs, build_id).empty();
+    return !CollectPatches(patch_dirs, build_id).empty() ||
+           !GetPrivateServerPatches(build_id).empty();
 }
 
 std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildID& build_id_) const {

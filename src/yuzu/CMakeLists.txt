@@ -15,6 +15,11 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(yuzu
+    grid0_friends_dialog.cpp
+    grid0_friends_dialog.h
+    grid0_patch_update.cpp
+    grid0_patch_update.h
+
     Info.plist
     about_dialog.cpp
     about_dialog.h
@@ -403,7 +408,7 @@ endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
+target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)
@@ -431,9 +436,16 @@ if(UNIX AND NOT APPLE)
     install(TARGETS yuzu)
 endif()
 
-if (WIN32 AND NOT YUZU_USE_BUNDLED_QT)
+if (WIN32 AND NOT YUZU_USE_BUNDLED_QT AND NOT CMAKE_CROSSCOMPILING)
+    find_program(WINDEPLOYQT_EXECUTABLE NAMES windeployqt6 windeployqt
+        HINTS "${QT_TARGET_PATH}/bin" REQUIRED)
     set(YUZU_EXE_DIR "$<TARGET_FILE_DIR:yuzu>")
-    add_custom_command(TARGET yuzu POST_BUILD COMMAND ${WINDEPLOYQT_EXECUTABLE} "${YUZU_EXE_DIR}/eden.exe" --dir "${YUZU_EXE_DIR}" --libdir "${YUZU_EXE_DIR}" --plugindir "${YUZU_EXE_DIR}/plugins" --no-compiler-runtime --no-opengl-sw --no-system-d3d-compiler --no-translations --verbose 0)
+    add_custom_command(TARGET yuzu POST_BUILD
+        COMMAND "${WINDEPLOYQT_EXECUTABLE}" "$<TARGET_FILE:yuzu>"
+            --dir "${YUZU_EXE_DIR}" --libdir "${YUZU_EXE_DIR}"
+            --plugindir "${YUZU_EXE_DIR}/plugins" --compiler-runtime
+            --no-opengl-sw --no-system-d3d-compiler --no-translations --verbose 0
+        VERBATIM)
 endif()
 
 if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64)

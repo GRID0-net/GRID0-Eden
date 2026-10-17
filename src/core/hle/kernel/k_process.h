@@ -7,6 +7,7 @@
 #pragma once
 
 #include <map>
+#include <shared_mutex>
 
 #include "core/arm/arm_interface.h"
 #include "core/file_sys/program_metadata.h"
@@ -79,6 +80,8 @@ private:
     std::map<KProcessAddress, u64> m_debug_page_refcounts{};
 #ifdef HAS_NCE
     ::Common::unordered_map<u64, u64> m_post_handlers{};
+    ::Common::unordered_map<u64, u32> m_nce_trapped_instructions;
+    mutable std::shared_mutex m_nce_instruction_mutex;
 #endif
     std::unique_ptr<Core::ExclusiveMonitor> m_exclusive_monitor;
     Core::Memory::Memory m_memory;
@@ -494,6 +497,10 @@ public:
     static void Switch(KernelCore& kernel, KProcess* cur_process, KProcess* next_process);
 
 #ifdef HAS_NCE
+    static constexpr u32 NceTrapInstruction = 0xD420C0A0; // BRK #0x605
+    void PatchNceInstructions(u64 address, std::span<u8> code);
+    u32 ReadNceInstruction(u64 address, u32 instruction) const;
+
     ::Common::unordered_map<u64, u64>& GetPostHandlers() noexcept {
         return m_post_handlers;
     }

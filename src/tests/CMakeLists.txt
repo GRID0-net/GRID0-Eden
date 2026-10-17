@@ -29,6 +29,15 @@ target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain
 
 add_test(NAME tests COMMAND tests)
 
+add_executable(tests_grid0
+    common/subpage_memory.cpp
+    video_core/hdr_uploads.cpp
+    core/private_server.cpp
+    ../core/hle/service/sockets/private_server.cpp
+)
+target_link_libraries(tests_grid0 PRIVATE common Catch2::Catch2WithMain Threads::Threads)
+add_test(NAME grid0_foundations COMMAND tests_grid0)
+
 # needed for vma
 if (NOT MSVC)
     target_compile_options(tests PRIVATE

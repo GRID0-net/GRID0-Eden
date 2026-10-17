@@ -9,6 +9,9 @@
 
 #include "common/signal_chain.h"
 #include "core/arm/nce/arm_nce.h"
+#include "common/settings.h"
+#include "common/scope_exit.h"
+#include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/nce/interpreter_visitor.h"
 #include "core/arm/nce/patcher.h"
 #include "core/core.h"
@@ -26,6 +29,7 @@ namespace {
 
 struct sigaction g_orig_bus_action;
 struct sigaction g_orig_segv_action;
+struct sigaction g_orig_trap_action;
 
 // Verify assembly offsets.
 using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
@@ -142,6 +146,9 @@ bool ArmNce::HandleFailedGuestFault(GuestContext* guest_ctx, void* raw_info, voi
 }
 
 bool ArmNce::HandleGuestAlignmentFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
+    if (Settings::IsNceWithSubpages()) {
+        return HandleGuestAccessFault(guest_ctx, raw_info, raw_context);
+    }
     auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
     auto* fpctx = GetFloatingPointState(host_ctx);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
@@ -159,6 +166,17 @@ bool ArmNce::HandleGuestAlignmentFault(GuestContext* guest_ctx, void* raw_info, 
 
 bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
     auto* info = static_cast<siginfo_t*>(raw_info);
+
+    if (Settings::IsNceWithSubpages()) {
+        // A 16K host page may contain incompatible 4K aliases or permissions. Step through
+        // the guest page table after leaving the signal handler, then resume native code.
+        auto* parent = guest_ctx->parent;
+        parent->m_needs_step = 1;
+        auto& params = parent->m_running_thread->GetNativeExecutionParameters();
+        params.lock.store(SpinLockLocked);
+        SaveGuestContext(guest_ctx, raw_context);
+        return false;
+    }
 
     // Try to handle an invalid access.
     // TODO: handle accesses which split a page?
@@ -179,7 +197,19 @@ void ArmNce::HandleHostAlignmentFault(int sig, void* raw_info, void* raw_context
 }
 
 void ArmNce::HandleHostAccessFault(int sig, void* raw_info, void* raw_context) {
-    return g_orig_segv_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    if (sig == SIGTRAP && !(g_orig_trap_action.sa_flags & SA_SIGINFO)) {
+        if (g_orig_trap_action.sa_handler == SIG_IGN) {
+            return;
+        }
+        if (g_orig_trap_action.sa_handler == SIG_DFL) {
+            sigaction(sig, &g_orig_trap_action, nullptr);
+            raise(sig);
+            return;
+        }
+        return g_orig_trap_action.sa_handler(sig);
+    }
+    const auto& action = sig == SIGTRAP ? g_orig_trap_action : g_orig_segv_action;
+    return action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
 }
 
 void ArmNce::LockThread(Kernel::KThread* thread) {
@@ -196,6 +226,44 @@ void ArmNce::UnlockThread(Kernel::KThread* thread) {
 }
 
 HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
+    for (;;) {
+        auto hr = RunNativeThread(thread);
+        if (m_needs_step) {
+            m_needs_step = 0;
+            if (True(hr)) {
+                return hr;
+            }
+            auto* params = &thread->GetNativeExecutionParameters();
+            {
+                // Software memory callbacks may wait for GPU work. Allow interrupts while
+                // outside native execution, then restore the context lock before returning.
+                UnlockThreadParameters(params);
+                SCOPE_EXIT { LockThreadParameters(params); };
+                ++m_subpage_step_count;
+                if (m_subpage_step_count <= 8 ||
+                    (m_subpage_step_count & (m_subpage_step_count - 1)) == 0) {
+                    LOG_DEBUG(Core_ARM, "NCE software step {} at {:#x}", m_subpage_step_count, m_guest_ctx.pc);
+                }
+                Kernel::Svc::ThreadContext context{};
+                GetContext(context);
+                m_instruction_stepper->SetContext(context);
+                m_instruction_stepper->SetTpidrroEl0(m_guest_ctx.tpidrro_el0);
+                hr = m_instruction_stepper->StepThread(thread);
+                m_instruction_stepper->GetContext(context);
+                SetContext(context);
+                m_guest_ctx.svc = m_instruction_stepper->GetSvcNumber();
+                params->tpidr_el0 = m_guest_ctx.tpidr_el0;
+            }
+            if (!True(hr & ~HaltReason::StepThread)) {
+                continue;
+            }
+            return hr & ~HaltReason::StepThread;
+        }
+        return hr;
+    }
+}
+
+HaltReason ArmNce::RunNativeThread(Kernel::KThread* thread) {
     // Check if we're already interrupted.
     // If we are, we can just return immediately.
     HaltReason hr = static_cast<HaltReason>(m_guest_ctx.esr_el1.exchange(0));
@@ -245,7 +313,6 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
     // Non-critical updates can happen after releasing the thread
     m_guest_ctx.tpidr_el0 = final_tpidr_el0;
 
-    // Return the halt reason.
     return hr;
 }
 
@@ -269,9 +336,17 @@ void ArmNce::SetSvcArguments(std::span<const uint64_t, 8> args) {
     }
 }
 
-ArmNce::ArmNce(System& system, bool uses_wall_clock, std::size_t core_index)
+ArmNce::ArmNce(System& system, bool uses_wall_clock, Kernel::KProcess* process, std::size_t core_index)
     : ArmInterface{uses_wall_clock}, m_system{system}, m_core_index{core_index} {
     m_guest_ctx.system = &m_system;
+    if (Settings::IsNceWithSubpages()) {
+        // Dynarmic must install its host fault handler before NCE installs the outer
+        // handler that restores host TLS when a native guest access faults.
+        auto& monitor = static_cast<DynarmicExclusiveMonitor&>(process->GetExclusiveMonitor());
+        m_instruction_stepper = std::make_unique<ArmDynarmic64>(
+            m_system, m_uses_wall_clock, process, monitor, m_core_index);
+        m_instruction_stepper->EnableNceStepping();
+    }
 }
 
 ArmNce::~ArmNce() = default;
@@ -302,6 +377,7 @@ void ArmNce::Initialize() {
         sigaddset(&signal_mask, BreakFromRunCodeSignal);
         sigaddset(&signal_mask, GuestAlignmentFaultSignal);
         sigaddset(&signal_mask, GuestAccessFaultSignal);
+        sigaddset(&signal_mask, SIGTRAP);
 
         struct sigaction return_to_run_code_action {};
         return_to_run_code_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -331,6 +407,9 @@ void ArmNce::Initialize() {
             reinterpret_cast<HandlerType>(&ArmNce::GuestAccessFaultSignalHandler);
         access_fault_action.sa_mask = signal_mask;
         Common::SigAction(GuestAccessFaultSignal, &access_fault_action, &g_orig_segv_action);
+        if (Settings::IsNceWithSubpages()) {
+            Common::SigAction(SIGTRAP, &access_fault_action, &g_orig_trap_action);
+        }
     });
 }
 
@@ -391,6 +470,12 @@ void ArmNce::SignalInterrupt(Kernel::KThread* thread) {
 [[maybe_unused]] const std::size_t CACHE_PAGE_SIZE = 4096;
 
 void ArmNce::ClearInstructionCache() {
+    if (Settings::IsNceWithSubpages()) {
+        m_system.DeviceMemory().buffer.FlushInstructionCache(0, std::numeric_limits<size_t>::max());
+    }
+    if (m_instruction_stepper) {
+        m_instruction_stepper->ClearInstructionCache();
+    }
 #ifdef __aarch64__
     // Ensure all previous memory operations complete
     asm volatile("dsb ish\n"
@@ -400,6 +485,9 @@ void ArmNce::ClearInstructionCache() {
 }
 
 void ArmNce::InvalidateCacheRange(u64 addr, std::size_t size) {
+    if (m_instruction_stepper) {
+        m_instruction_stepper->InvalidateCacheRange(addr, size);
+    }
     this->ClearInstructionCache();
 }
 

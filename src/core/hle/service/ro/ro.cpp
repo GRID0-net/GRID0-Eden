@@ -433,40 +433,47 @@ public:
             auto& memory = process->GetMemory();
             std::vector<u8> text(rx_size);
             memory.ReadBlock(nro_info->base_address, text.data(), text.size());
-            Core::NCE::Patcher patch{text};
-            const size_t patch_size = patch.GetSectionSize();
-            if (patch_size != 0) {
-                constexpr auto permission = Kernel::Svc::MemoryPermission::ReadExecute;
-                auto* patch_memory = Kernel::KSharedMemory::Create(kernel);
-                SCOPE_EXIT { patch_memory->Close(kernel); };
-                R_TRY(patch_memory->Initialize(kernel, kernel.System().DeviceMemory(), process, permission, permission, patch_size));
-                Kernel::KSharedMemory::Register(kernel, patch_memory);
-                const std::array<s64, 2> offsets{static_cast<s64>(total_size + Kernel::PageSize),-static_cast<s64>(patch_size + Kernel::PageSize)};
-                std::vector<Core::NCE::InstructionPatch> tls_patches;
-                std::span<const u32> instructions;
-                u64 patch_address = 0;
-                for (const s64 offset : offsets) {
-                    instructions = patch.RelocateRuntimeTls(offset, tls_patches);
-                    if (instructions.empty()) {continue;}
-                    const u64 address = static_cast<u64>(static_cast<s64>(nro_info->base_address) + offset);
-                    if (R_FAILED(patch_memory->Map(*process, address, patch_size, permission))) {continue;}
-                    patch_address = address;
-                    break;
-                }
-                R_UNLESS(patch_address != 0, RO::ResultOutOfAddressSpace);
-                const Result add_shared_memory_result = process->AddSharedMemory(kernel, patch_memory, patch_address, patch_size);
-                if (R_FAILED(add_shared_memory_result)) {
-                    R_ASSERT(patch_memory->Unmap(*process, patch_address, patch_size));
-                }
-                R_TRY(add_shared_memory_result);
-                std::memcpy(patch_memory->GetPointer(), instructions.data(), instructions.size_bytes());
-                auto* ptr = reinterpret_cast<char*>(patch_address);
-                __builtin___clear_cache(ptr, ptr + instructions.size_bytes());
-                for (const auto& instruction : tls_patches) {
-                    const u64 address = nro_info->base_address + instruction.offset;
-                    memory.Write32(address, instruction.replacement);
-                    ptr = reinterpret_cast<char*>(address);
-                    __builtin___clear_cache(ptr, ptr + sizeof(u32));
+            if (Settings::IsNceWithSubpages()) {
+                process->PatchNceInstructions(nro_info->base_address, text);
+                memory.WriteBlock(nro_info->base_address, text.data(), text.size());
+                kernel.System().DeviceMemory().buffer.FlushInstructionCache(
+                    nro_info->base_address, text.size());
+            } else {
+                Core::NCE::Patcher patch{text};
+                const size_t patch_size = patch.GetSectionSize();
+                if (patch_size != 0) {
+                    constexpr auto permission = Kernel::Svc::MemoryPermission::ReadExecute;
+                    auto* patch_memory = Kernel::KSharedMemory::Create(kernel);
+                    SCOPE_EXIT { patch_memory->Close(kernel); };
+                    R_TRY(patch_memory->Initialize(kernel, kernel.System().DeviceMemory(), process, permission, permission, patch_size));
+                    Kernel::KSharedMemory::Register(kernel, patch_memory);
+                    const std::array<s64, 2> offsets{static_cast<s64>(total_size + Kernel::PageSize),-static_cast<s64>(patch_size + Kernel::PageSize)};
+                    std::vector<Core::NCE::InstructionPatch> tls_patches;
+                    std::span<const u32> instructions;
+                    u64 patch_address = 0;
+                    for (const s64 offset : offsets) {
+                        instructions = patch.RelocateRuntimeTls(offset, tls_patches);
+                        if (instructions.empty()) {continue;}
+                        const u64 address = static_cast<u64>(static_cast<s64>(nro_info->base_address) + offset);
+                        if (R_FAILED(patch_memory->Map(*process, address, patch_size, permission))) {continue;}
+                        patch_address = address;
+                        break;
+                    }
+                    R_UNLESS(patch_address != 0, RO::ResultOutOfAddressSpace);
+                    const Result add_shared_memory_result = process->AddSharedMemory(kernel, patch_memory, patch_address, patch_size);
+                    if (R_FAILED(add_shared_memory_result)) {
+                        R_ASSERT(patch_memory->Unmap(*process, patch_address, patch_size));
+                    }
+                    R_TRY(add_shared_memory_result);
+                    std::memcpy(patch_memory->GetPointer(), instructions.data(), instructions.size_bytes());
+                    auto* ptr = reinterpret_cast<char*>(patch_address);
+                    __builtin___clear_cache(ptr, ptr + instructions.size_bytes());
+                    for (const auto& instruction : tls_patches) {
+                        const u64 address = nro_info->base_address + instruction.offset;
+                        memory.Write32(address, instruction.replacement);
+                        ptr = reinterpret_cast<char*>(address);
+                        __builtin___clear_cache(ptr, ptr + sizeof(u32));
+                    }
                 }
             }
         }

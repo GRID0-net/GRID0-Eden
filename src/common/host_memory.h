@@ -51,6 +51,7 @@ public:
     void Protect(size_t virtual_offset, size_t length, MemoryPermission perms);
 
     void EnableDirectMappedAddress();
+    void FlushInstructionCache(size_t virtual_offset, size_t length);
 
     void ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value);
 

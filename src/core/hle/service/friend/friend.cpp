@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <queue>
+#include <chrono>
+#include <cstring>
+#include "core/hle/service/friend/grid0_friends.h"
 #include "common/logging.h"
 #include "common/uuid.h"
 #include "core/core.h"
@@ -18,6 +21,50 @@
 
 namespace Service::Friend {
 
+namespace {
+
+// nn::friends::detail::FriendImpl.
+constexpr size_t FriendRecordSize = 0x200;
+
+u32 PresenceStatusOf(const Grid0::Friend& f) {
+    if (f.state == "PLAYING") {
+        return 2; // OnlinePlay
+    }
+    return f.state == "ONLINE" ? 1 : 0;
+}
+
+// Builds a friend record: uid 0x00, NSA id 0x10, nickname 0x18 (0x21 bytes), presence 0x40
+// (uid, last-online 0x50, status 0x58, same-application 0x5C, app key-value storage 0x60..0x120),
+// favourite 0x120, valid 0x128.
+std::array<u8, FriendRecordSize> MakeFriendRecord(const Grid0::Friend& f, u64 current_title) {
+    std::array<u8, FriendRecordSize> r{};
+    const u64 uid_hi = 0x1100000000000000ULL;
+    std::memcpy(r.data() + 0x00, &f.nsa_id, 8);
+    std::memcpy(r.data() + 0x08, &uid_hi, 8);
+    std::memcpy(r.data() + 0x10, &f.nsa_id, 8);
+    std::memcpy(r.data() + 0x18, f.nickname.data(), std::min<size_t>(f.nickname.size(), 0x20));
+
+    std::memcpy(r.data() + 0x40, r.data(), 0x10);
+    const s64 last_online = 0x7FFFFFFFFFFFFFFFLL;
+    std::memcpy(r.data() + 0x50, &last_online, 8);
+    const u32 status = PresenceStatusOf(f);
+    std::memcpy(r.data() + 0x58, &status, 4);
+    // A friend in the same game is one the game asks about joining; one in another game is not.
+    u64 friend_title = 0;
+    try {
+        friend_title = f.app_id.empty() ? 0 : std::stoull(f.app_id, nullptr, 16);
+    } catch (...) {
+    }
+    r[0x5C] = status == 2 && friend_title != 0 && friend_title == current_title;
+    std::memcpy(r.data() + 0x60, f.app_field.data(), std::min<size_t>(f.app_field.size(), 0xC0));
+
+    r[0x120] = f.is_favorite;
+    r[0x128] = 1;
+    return r;
+}
+
+} // namespace
+
 class IFriendService final : public ServiceFramework<IFriendService> {
 public:
     explicit IFriendService(Core::System& system_)
@@ -26,10 +73,10 @@ public:
         static const FunctionInfo functions[] = {
             {0, &IFriendService::GetCompletionEvent, "GetCompletionEvent"},
             {1, &IFriendService::Cancel, "Cancel"},
-            {10100, nullptr, "GetFriendListIds"},
+            {10100, &IFriendService::GetFriendListIds, "GetFriendListIds"},
             {10101, &IFriendService::GetFriendList, "GetFriendList"},
-            {10102, nullptr, "UpdateFriendInfo"},
-            {10110, nullptr, "GetFriendProfileImage"},
+            {10102, &IFriendService::UpdateFriendInfo, "UpdateFriendInfo"},
+            {10110, &IFriendService::GetFriendProfileImage, "GetFriendProfileImage"},
             {10111, nullptr, "GetFriendProfileImageWithImageSize"}, // 18.0.0+
             {10120, &IFriendService::CheckFriendListAvailability, "CheckFriendListAvailability"},
             {10121, nullptr, "EnsureFriendListAvailable"},
@@ -144,11 +191,88 @@ public:
         completion_event = service_context.CreateEvent("IFriendService:CompletionEvent");
     }
 
+    Result HandleSyncRequest(Kernel::KServerSession& session, HLERequestContext& context) override {
+        const Result result = ServiceFrameworkBase::HandleSyncRequest(session, context);
+        if (!is_async_session) {
+            LOG_DEBUG(Service_Friend, "signalling completion after command {}", context.GetCommand());
+            completion_event->Signal(system.Kernel());
+        }
+        ++handled_requests;
+        return result;
+    }
+
     ~IFriendService() override {
         service_context.CloseEvent(completion_event);
     }
 
 private:
+    void GetFriendProfileImage(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    [[maybe_unused]] const auto uuid = rp.PopRaw<Common::UUID>();
+    const auto friend_id = rp.Pop<u64>();
+    u32 size = 0;
+    // The game does not ask again: a short wait beats a "?" picture for the whole session.
+    if (const auto jpeg = Grid0::ProfileImage(friend_id, std::chrono::milliseconds(1500));
+        jpeg && !jpeg->empty() && jpeg->size() <= ctx.GetWriteBufferSize()) {
+        ctx.WriteBuffer(*jpeg);
+        size = static_cast<u32>(jpeg->size());
+    }
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(size);
+}
+
+    void UpdateFriendInfo(HLERequestContext& ctx) {
+    // One record per requested id, in the same order: the caller pairs answers with its ids by
+    // position, so an id we cannot resolve stays an invalid record rather than being skipped.
+    const auto input = ctx.ReadBuffer();
+    std::vector<u64> wanted(input.size() / sizeof(u64));
+    std::memcpy(wanted.data(), input.data(), wanted.size() * sizeof(u64));
+
+    const auto friends = Grid0::Get();
+    const u64 title = system.GetApplicationProcessProgramID();
+    const size_t capacity = ctx.GetWriteBufferSize() / FriendRecordSize;
+    std::vector<u8> out;
+    size_t resolved = 0;
+    for (size_t i = 0; i < wanted.size() && i < capacity; ++i) {
+        std::array<u8, FriendRecordSize> record{};
+        for (const auto& f : friends) {
+            if (f.nsa_id == wanted[i]) {
+                record = MakeFriendRecord(f, title);
+                ++resolved;
+                break;
+            }
+        }
+        out.insert(out.end(), record.begin(), record.end());
+    }
+    if (!out.empty()) {
+        ctx.WriteBuffer(out);
+    }
+    LOG_DEBUG(Service_Friend, "UpdateFriendInfo {} id(s) -> {} resolved", wanted.size(), resolved);
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+    void GetFriendListIds(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto offset = rp.Pop<u32>();
+        // A game asks once, early (Splatoon 3 at boot), and keeps what it got for the whole
+        // session; a short, bounded wait for the first fetch beats an empty list forever.
+        const auto friends = Grid0::GetWarm(std::chrono::milliseconds(2000));
+        const size_t capacity = ctx.GetWriteBufferNumElements<u64>();
+        std::vector<u64> ids;
+        for (size_t i = offset; i < friends.size() && ids.size() < capacity; ++i) {
+            ids.push_back(friends[i].nsa_id);
+        }
+        if (!ids.empty()) {
+            ctx.WriteBuffer(ids);
+        }
+        LOG_INFO(Service_Friend, "GetFriendListIds offset={} -> {}", offset, ids.size());
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(static_cast<u32>(ids.size()));
+    }
+
     enum class PresenceFilter : u32 {
         None = 0,
         Online = 1,
@@ -178,13 +302,14 @@ private:
     static_assert(sizeof(FriendsUserSetting) == 0x800, "FriendsUserSetting is an invalid size");
 
     void GetCompletionEvent(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_Friend, "called");
-
-        auto& readable_event = completion_event->GetReadableEvent();
-
+        LOG_DEBUG(Service_Friend, "GetCompletionEvent called");
+        // AsyncContextInternal opens a fresh session and asks for this first.
+        if (handled_requests == 0) {
+            is_async_session = true;
+        }
         IPC::ResponseBuilder rb{ctx, 2, 1};
-        rb.Push(readable_event.Signal(system.Kernel()));
-        rb.PushCopyObjects(ctx, readable_event);
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, completion_event->GetReadableEvent());
     }
 
     void Cancel(HLERequestContext& ctx) {
@@ -197,20 +322,25 @@ private:
     }
 
     void GetFriendList(HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
-        const auto friend_offset = rp.Pop<u32>();
-        const auto uuid = rp.PopRaw<Common::UUID>();
-        [[maybe_unused]] const auto filter = rp.PopRaw<SizedFriendFilter>();
-        const auto pid = rp.Pop<u64>();
-        LOG_WARNING(Service_Friend, "(STUBBED) called, offset={}, uuid=0x{}, pid={}", friend_offset,
-                    uuid.RawString(), pid);
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-
-        rb.Push<u32>(0); // Friend count
-        // TODO(ogniK): Return a buffer of u64s which are the "NetworkServiceAccountId"
+    IPC::RequestParser rp{ctx};
+    const auto offset = rp.Pop<u32>();
+    const auto friends = Grid0::Get();
+    const u64 title = system.GetApplicationProcessProgramID();
+    const size_t capacity = ctx.GetWriteBufferSize() / FriendRecordSize;
+    std::vector<u8> out;
+    u32 count = 0;
+    for (size_t i = offset; i < friends.size() && count < capacity; ++i, ++count) {
+        const auto record = MakeFriendRecord(friends[i], title);
+        out.insert(out.end(), record.begin(), record.end());
     }
+    if (!out.empty()) {
+        ctx.WriteBuffer(out);
+    }
+    LOG_INFO(Service_Friend, "GetFriendList offset={} -> {}", offset, count);
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(count);
+}
 
     void CheckFriendListAvailability(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
@@ -251,11 +381,19 @@ private:
     }
 
     void UpdateUserPresence(HLERequestContext& ctx) {
-        // Stub used by Retro City Rampage
-        LOG_WARNING(Service_Friend, "(STUBBED) called");
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
+    // The nn::friends UserPresence (0xE0): uid 0x00, last-online 0x10, status 0x18, the game's
+    // app key-value storage 0x20..0xE0. The status and that blob are what a friend needs to see
+    // this player online and join them.
+    const auto presence = ctx.ReadBuffer();
+    if (presence.size() >= 0xE0) {
+        u32 status{};
+        std::memcpy(&status, presence.data() + 0x18, sizeof(status));
+        const std::vector<u8> app_field(presence.begin() + 0x20, presence.begin() + 0xE0);
+        Grid0::PublishPresence(status, system.GetApplicationProcessProgramID(), app_field);
     }
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
 
     void GetPlayHistoryRegistrationKey(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
@@ -270,12 +408,10 @@ private:
     }
 
     void GetFriendCount(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_Friend, "(STUBBED) called");
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push(0);
-    }
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push(static_cast<s32>(Grid0::Get().size()));
+}
 
     void GetNewlyFriendCount(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "(STUBBED) called");
@@ -370,6 +506,8 @@ private:
     KernelHelpers::ServiceContext service_context;
 
     Kernel::KEvent* completion_event;
+    u64 handled_requests{};
+    bool is_async_session{};
 };
 
 class INotificationService final : public ServiceFramework<INotificationService> {

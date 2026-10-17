@@ -5,86 +5,28 @@
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 -->
-<!-- lang: en-GB -->
 
-<h1 align="center">
-  <br>
-  <a href="https://git.eden-emu.dev/eden-emu/eden"><img src="./dist/qt_themes/default/icons/256x256/eden.png" alt="Eden" width="200"></a>
-  <br>
-  <b>Eden</b>
-  <br>
-</h1>
+# GRID0-Eden
 
-<h4 align="center"><b>Eden</b> is a free and open-source (FOSS) Switch 1 emulator started by developer Camille LaVey.
-<br>
-Written in C++, with builds for Windows, Linux, macOS, Android, FreeBSD and more.
-</h4>
+because we needed a third switch emu for the people!
 
-<p align="center">
-    </a>
-    <a href="https://discord.gg/HstXbPch7X">
-        <img src="https://img.shields.io/discord/1367654015269339267?color=5865F2&label=Eden&logo=discord&logoColor=white"
-            alt="Discord">
-    </a>
-    <a href="https://stt.gg/qKgFEAbH">
-        <img src="https://img.shields.io/revolt/invite/qKgFEAbH?color=d61f3a&label=Stoat"
-            alt="Stoat">
-    </a>
-</p>
+This is basically just eden but modified to have the GRID0+ patches, plus networking and friend management. GRID0+ is our replacement online service for Splatoon 3, and this brings it to another emulator! you can grab a build from the releases tab, or [build it yourself](docs/Build.md).
 
-<p align="center">
-  <a href="#compatibility">Compatibility</a> |
-  <a href="#development">Development</a> |
-  <a href="#building">Building</a> |
-  <a href="#download">Download</a> |
-  <a href="#support">Support</a> |
-  <a href="#license">License</a>
-</p>
+## why a third emu?
 
-## Compatibility
+for some people citron-neo doesnt work all that great, and I (lizzy speaking hi) have been playing around with making more eden based citrosis builds. this isnt that, but it is more functional and optimized than citron-neo!
 
-The emulator is capable of running most commercial games at full speed, provided you meet the necessary hardware requirements.
+still, the pick is up to you, as all 3 work well. this is here by popular demand, and having another option is nice. use whichever one works best on your setup!
 
-A list of supported games will be available in future. Please be patient.
+## getting online
 
-Check out our [website](https://eden-emu.dev) for the latest news on exciting features, monthly progress reports, and more!
+open **GRID0+ → Account and server…** and enter your GRID0+ account on the Network page. pick your active network adapter and turn off **Enable Airplane Mode** so the game can connect.
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/eden-emulator.svg)](https://repology.org/project/eden-emulator/versions)
+eden will check for GRID0+ patch updates and ask before installing them. the friends menu is under **GRID0+** too, so you can manage friends and see who's around from there.
 
-## Contribute
 
-To contribute to Eden; be it financially, code, bug reports, or otherwise, see our [Contributing guidelines](./CONTRIBUTING.md).
+## credits and licensing
 
-## Documentation
+big thanks to the [Eden](https://git.eden-emu.dev/eden-emu/eden) developers, the original yuzu contributors, and our work on [GRID0-citron](https://github.com/GRID0-net/GRID0-citron). this fork builds upon that, and the original credits and license notices stay with it.
 
-We have a user manual! See our [User Handbook](./docs/user/README.md).
-
-## Building
-
-See the [General Build Guide](docs/Build.md)
-
-For information on provided development tooling, see the [Tools directory](./tools)
-
-## Download
-
-You can download the latest releases from [our release page](https://git.eden-emu.dev/eden-emu/eden/releases).
-
-Save us some bandwidth! We have [mirrors available](./docs/user/ThirdParty.md#mirrors) as well.
-
-## License
-
-Eden is licensed under the GPLv3 (or any later version). Refer to the [LICENSE.txt](https://git.eden-emu.dev/eden-emu/eden/src/branch/master/LICENSE.txt) file.
-
-## Special thanks
-
-Super special thanks to Cloudflare for preventing the git server from blowing up.
-
-- Yuzu
-- Ryujinx
-- Sudachi
-- Citron
-- Torzu
-- Suyu
-- Ryubing
-
-And everyone who continues or had contributed to the project! <3
+GRID0-Eden is licensed under **GPLv3 or later**, just like Eden. see [LICENSE.txt](LICENSE.txt) for the full license. the GRID0-citron code keeps its GPLv2-or-later notices, and third-party components keep their own licenses, included in [LICENSES](LICENSES) and their source files.

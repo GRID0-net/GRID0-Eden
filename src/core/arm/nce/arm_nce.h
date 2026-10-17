@@ -4,6 +4,7 @@
 #pragma once
 
 #include <mutex>
+#include <csignal>
 
 #include "core/arm/arm_interface.h"
 #include "core/arm/nce/guest_context.h"
@@ -15,10 +16,11 @@ class Memory;
 namespace Core {
 
 class System;
+class ArmDynarmic64;
 
 class ArmNce final : public ArmInterface {
 public:
-    ArmNce(System& system, bool uses_wall_clock, std::size_t core_index);
+    ArmNce(System& system, bool uses_wall_clock, Kernel::KProcess* process, std::size_t core_index);
     ~ArmNce() override;
 
     void Initialize() override;
@@ -68,6 +70,8 @@ private:
     static void UnlockThreadParameters(void* tpidr);
 
 private:
+    HaltReason RunNativeThread(Kernel::KThread* thread);
+
     // C++ implementation functions for assembly definitions.
     static void* RestoreGuestContext(void* raw_context);
     static void SaveGuestContext(GuestContext* ctx, void* raw_context);
@@ -83,6 +87,10 @@ public:
     // Members set on initialization.
     std::size_t m_core_index{};
     pid_t m_thread_id{-1};
+
+    std::unique_ptr<ArmDynarmic64> m_instruction_stepper;
+    volatile std::sig_atomic_t m_needs_step{};
+    u64 m_subpage_step_count{};
 
     // Core context.
     GuestContext m_guest_ctx{};

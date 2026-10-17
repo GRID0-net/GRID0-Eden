@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/host_memory.h"
+#include "common/sparse_large_vector.h"
 #include "common/literals.h"
 
 using Common::HostMemory;
@@ -29,6 +30,9 @@ TEST_CASE("HostMemory: Initialize and deinitialize", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple map", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x8000, 0x1000, PERMS, HEAP);
@@ -39,6 +43,9 @@ TEST_CASE("HostMemory: Simple map", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple mirror map", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -51,6 +58,9 @@ TEST_CASE("HostMemory: Simple mirror map", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple unmap", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -63,6 +73,9 @@ TEST_CASE("HostMemory: Simple unmap", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple unmap and remap", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -152,6 +165,9 @@ TEST_CASE("HostMemory: Unmap to right", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial right unmap check bindings", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x4000, PERMS, HEAP);
@@ -165,6 +181,9 @@ TEST_CASE("HostMemory: Partial right unmap check bindings", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial left unmap check bindings", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x4000, PERMS, HEAP);
@@ -180,6 +199,9 @@ TEST_CASE("HostMemory: Partial left unmap check bindings", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial middle unmap check bindings", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x4000, PERMS, HEAP);
@@ -195,6 +217,9 @@ TEST_CASE("HostMemory: Partial middle unmap check bindings", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common]") {
+    if (Common::HostPageSize != 0x1000) {
+        SKIP("Raw 4 KiB views require a 4 KiB host; subpage_memory tests cover larger hosts");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x2000, PERMS, HEAP);

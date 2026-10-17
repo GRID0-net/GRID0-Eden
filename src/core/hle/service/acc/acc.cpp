@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 #include "common/common_types.h"
 #include "common/fs/file.h"
@@ -24,6 +25,8 @@
 #include "core/hle/service/acc/async_context.h"
 #include "core/hle/service/acc/errors.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/service/acc/switchnet_account.h"
+#include "core/hle/service/sockets/private_server.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/server_manager.h"
@@ -653,6 +656,33 @@ public:
     }
 };
 
+// Writes the SwitchNet-signed id token into the request's output buffer and returns its size, or
+// returns 0 -- what this stub always returned -- when SwitchNet is not configured or the login
+// failed. A token larger than the buffer the game offered is refused rather than truncated: a
+// truncated JWT is corrupt in a way the game server reports far from here.
+static u32 WriteSwitchNetIdToken(HLERequestContext& ctx) {
+    const std::optional<std::string> token = SwitchNet::GetIdToken();
+    if (!token) {
+        if (Service::Sockets::NetworkDiagnosticsEnabled() || SwitchNet::IsConfigured()) {
+            LOG_WARNING(Service_ACC, "GRID0+: the game asked for its id token and got none; it "
+                                     "will report a sign-in error (2321-4992). See the SwitchNet "
+                                     "login lines above for why.");
+        }
+        return 0;
+    }
+    if (Service::Sockets::NetworkDiagnosticsEnabled()) {
+        LOG_WARNING(Service_ACC, "GRID0+: id token handed to the game ({} bytes, buffer {})",
+                    token->size(), ctx.CanWriteBuffer() ? ctx.GetWriteBufferSize() : 0);
+    }
+    if (!ctx.CanWriteBuffer() || token->size() > ctx.GetWriteBufferSize()) {
+        LOG_ERROR(Service_ACC, "The SwitchNet id token is {} bytes; the game offered {}",
+                  token->size(), ctx.CanWriteBuffer() ? ctx.GetWriteBufferSize() : 0);
+        return 0;
+    }
+    ctx.WriteBuffer(token->data(), token->size());
+    return static_cast<u32>(token->size());
+}
+
 class EnsureTokenIdCacheAsyncInterface final : public IAsyncContext {
 public:
     explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_) : IAsyncContext{system_} {
@@ -661,11 +691,11 @@ public:
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        LOG_DEBUG(Service_ACC, "called");
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(0);
+        rb.Push(WriteSwitchNetIdToken(ctx));
     }
 
 protected:
@@ -715,13 +745,31 @@ private:
     void GetAccountId(HLERequestContext& ctx) {
         LOG_DEBUG(Service_ACC, "called");
 
+        // Signed in to GRID0+, this is the account's network service account id: the id NPLN
+        // names this user by, and the owner of every friend relationship it sends. Splatoon 3
+        // fetched its friend list and then never looked at it (no presences, empty friend list)
+        // while this answered with a hash of the local profile instead.
+        u64 account_id = profile_manager->GetLastOpenedUser().Hash();
+        if (SwitchNet::IsConfigured()) {
+            if (const auto nsa = SwitchNet::GetNetworkServiceAccountId()) {
+                account_id = *nsa;
+            }
+        }
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void EnsureIdTokenCacheAsync(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        LOG_DEBUG(Service_ACC, "called");
+
+        // The login happens here, where the game expects network work to be done, so that
+        // LoadIdTokenCache is normally a cache lookup. It completes before this returns: against
+        // a server on the operator's own network that is milliseconds, and it saves completing
+        // an async context from a host thread.
+        if (SwitchNet::IsConfigured()) {
+            SwitchNet::GetIdToken();
+        }
 
         IPC::ResponseBuilder rb{ctx, 2, 0, 1};
         rb.Push(ResultSuccess);
@@ -735,27 +783,35 @@ private:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        LOG_DEBUG(Service_ACC, "called");
 
-        std::vector<u8> token_data(0x100);
-        std::fill(token_data.begin(), token_data.end(), u8(0));
-
-        ctx.WriteBuffer(token_data);
-
-        IPC::ResponseBuilder rb{ctx, 3};
+        const auto token_size = WriteSwitchNetIdToken(ctx);
+        IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.Push(static_cast<u32>(token_data.size()));
+        rb.Push(token_size);
+        rb.Push(0);
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        LOG_DEBUG(Service_ACC, "called");
 
+        // The SDK's GetBirthday reads a NUL-terminated date from the start of this record
+        // (NextendoNetwork citron d8cdcd9, "Splat 3 Plaza posts fix"); all zeros reads as an
+        // empty birthday. The record is the fixed-size C (pointer) buffer; WriteBuffer(…, 0)
+        // would prefer B slot 0, which is the separate type-6 out buffer.
         std::vector<u8> nas_user_base_for_application(0x68);
-        ctx.WriteBuffer(nas_user_base_for_application);
+        constexpr char birthday[] = "2000-01-01";
+        std::memcpy(nas_user_base_for_application.data(), birthday, sizeof(birthday));
+        if (!ctx.BufferDescriptorC().empty() && ctx.BufferDescriptorC()[0].Size() > 0) {
+            ctx.WriteBufferC(nas_user_base_for_application.data(),
+                             std::min<std::size_t>(nas_user_base_for_application.size(),
+                                                   ctx.BufferDescriptorC()[0].Size()),
+                             0);
+        }
 
-        if (ctx.CanWriteBuffer(1)) {
-            std::vector<u8> unknown_out_buffer(ctx.GetWriteBufferSize(1));
-            ctx.WriteBuffer(unknown_out_buffer, 1);
+        if (!ctx.BufferDescriptorB().empty() && ctx.BufferDescriptorB()[0].Size() > 0) {
+            std::vector<u8> unknown_out_buffer(ctx.BufferDescriptorB()[0].Size());
+            ctx.WriteBufferB(unknown_out_buffer.data(), unknown_out_buffer.size(), 0);
         }
 
         IPC::ResponseBuilder rb{ctx, 4};

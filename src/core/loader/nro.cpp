@@ -17,6 +17,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "common/sparse_large_vector.h"
 #include "common/random.h"
 #include "common/swap.h"
 #include "core/core.h"
@@ -247,7 +248,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
     // Create NCE patcher
     Core::NCE::Patcher patch{};
 
-    if (Settings::IsNceEnabled()) {
+    if (Settings::IsNceEnabled() && !Settings::IsNceWithSubpages()) {
         // Patch SVCs and MRS calls in the guest code
         patch.PatchText(program_image, code);
 
@@ -278,6 +279,10 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
     std::uintptr_t aslr_offset = ((::Settings::values.rng_seed_enabled.GetValue()
         ? ::Settings::values.rng_seed.GetValue() : Common::Random::Random64(0)) << 12) & 0xfff000;
 
+    if (Settings::IsNceWithSubpages()) {
+        aslr_offset = Common::AlignDown(aslr_offset, Common::HostPageSize);
+    }
+
     // Setup the process code layout
     if (process
             .LoadFromMetadata(system.Kernel(), FileSys::ProgramMetadata::GetDefault(), image_size, fastmem_base, aslr_offset)
@@ -288,7 +293,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
     // Relocate code patch and copy to the program_image if running under NCE.
     // This needs to be after LoadFromMetadata so we can use the process entry point.
 #ifdef HAS_NCE
-    if (Settings::IsNceEnabled()) {
+    if (Settings::IsNceEnabled() && !Settings::IsNceWithSubpages()) {
         patch.RelocateAndCopy(process.GetEntryPoint(), code, program_image,
                               &process.GetPostHandlers());
     }

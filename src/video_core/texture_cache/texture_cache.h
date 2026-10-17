@@ -14,6 +14,7 @@
 
 #include "common/alignment.h"
 #include "common/settings.h"
+#include "video_core/citrosis_diag.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
@@ -173,7 +174,7 @@ void TextureCache<P>::TickFrame() {
     if (runtime.CanReportMemoryUsage()) {
         total_used_memory = runtime.GetDeviceMemoryUsage();
     }
-    if (total_used_memory > minimum_memory) {
+    if (total_used_memory > minimum_memory && !CitrosisDiag::TextureGcDisabled()) {
         RunGarbageCollector();
     }
     sentenced_images.Tick();
@@ -1173,6 +1174,25 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         image.UploadMemory(staging, copies);
     } else {
         const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span);
+        if (CitrosisDiag::SanitizeUploads()) {
+            const size_t bytes = std::min<size_t>(mapped_span.size_bytes(),
+                                                  image.unswizzled_size_bytes);
+            const size_t fixed =
+                CitrosisDiag::ScrubNonFinite(image.info.format, mapped_span.first(bytes));
+            if (fixed != 0) {
+                static std::atomic<u32> reports{};
+                const u32 n = reports.fetch_add(1, std::memory_order_relaxed);
+                if (n < 64 || (n & (n - 1)) == 0) {
+                    LOG_WARNING(HW_GPU,
+                                "Citrosis: scrubbed {} non-finite components from upload of "
+                                "image 0x{:x} (format {}, {}x{}x{}, frame {}) (#{})",
+                                fixed, gpu_addr, static_cast<u32>(image.info.format),
+                                image.info.size.width, image.info.size.height,
+                                image.info.size.depth, frame_tick, n + 1);
+                }
+            }
+        }
+
         image.UploadMemory(staging, copies);
     }
 }

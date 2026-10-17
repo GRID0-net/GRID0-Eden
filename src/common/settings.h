@@ -23,6 +23,9 @@
 
 namespace Settings {
 
+constexpr std::string_view Grid0DefaultAddress = "89.168.58.206";
+constexpr std::string_view Grid0DefaultNatSecondaryAddress = "145.241.167.178";
+
 const char* TranslateCategory(Settings::Category category);
 
 struct ResolutionScalingInfo {
@@ -933,6 +936,30 @@ struct Values {
                                            Category::Network};
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
 
+    // Private Nintendo servers: GRID0+ (a SwitchNet server) by default. An empty address is the
+    // "off" state: there is no separate enable switch that could contradict it.
+    //
+    // Address that Nintendo's hostnames resolve to. An IP address, not a hostname: the resolver
+    // this configures is the one that would have to resolve it.
+    Setting<std::string> private_server_address{linkage, std::string(Grid0DefaultAddress),
+                                                "private_server_address", Category::Network};
+    // Address nncs2 resolves to. Pia's NAT check needs it to differ from nncs1's.
+    Setting<std::string> private_server_nat_secondary_address{
+        linkage, std::string(Grid0DefaultNatSecondaryAddress),
+        "private_server_nat_secondary_address", Category::Network};
+    // PEM bundle of extra CAs the guest's TLS trusts. Empty uses the built-in SwitchNet Local CA
+    // whenever private_server_address is set.
+    Setting<std::string> private_server_ca_bundle{linkage, std::string(),
+                                                  "private_server_ca_bundle", Category::Network};
+    // The emulator's own login to the server, as host or host:port, with the username and
+    // password the GRID0+ Discord bot's /register gives.
+    Setting<std::string> switchnet_server{linkage, std::string(Grid0DefaultAddress),
+                                          "switchnet_server", Category::Network};
+    Setting<std::string> switchnet_username{linkage, std::string(), "switchnet_username",
+                                            Category::Network};
+    Setting<std::string> switchnet_password{linkage, std::string(), "switchnet_password",
+                                            Category::Network};
+
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
                                      Category::WebService};
@@ -975,6 +1002,7 @@ bool IsGPUFenceBehaviorAccurate();
 bool IsFastmemEnabled();
 void SetNceEnabled(bool is_64bit);
 bool IsNceEnabled();
+bool IsNceWithSubpages();
 
 void SetCurrentProgramID(u64 program_id);
 u64 GetCurrentProgramID();

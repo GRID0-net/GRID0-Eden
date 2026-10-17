@@ -22,6 +22,7 @@
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #ifdef HAS_NCE
 #include "core/arm/nce/arm_nce.h"
+#include "core/arm/nce/instructions.h"
 #endif
 
 namespace Kernel {
@@ -1268,7 +1269,50 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
     R_SUCCEED();
 }
 
+#ifdef HAS_NCE
+void KProcess::PatchNceInstructions(u64 address, std::span<u8> code) {
+    std::unique_lock lock{m_nce_instruction_mutex};
+    boost::unordered::erase_if(m_nce_trapped_instructions, [address, size = code.size()](const auto& entry) {
+        return entry.first >= address && entry.first - address < size;
+    });
+    for (size_t offset = 0; offset + sizeof(u32) <= code.size(); offset += sizeof(u32)) {
+        u32 instruction;
+        std::memcpy(&instruction, code.data() + offset, sizeof(instruction));
+        auto svc = Core::NCE::SVC{instruction};
+        auto mrs = Core::NCE::MRS{instruction};
+        auto msr = Core::NCE::MSR{instruction};
+        auto exclusive = Core::NCE::Exclusive{instruction};
+        const bool read_system = mrs.Verify() &&
+            (mrs.GetSystemReg() == Core::NCE::TpidrEl0 ||
+             mrs.GetSystemReg() == Core::NCE::TpidrroEl0 ||
+             mrs.GetSystemReg() == Core::NCE::CntpctEl0 ||
+             mrs.GetSystemReg() == Core::NCE::CntfrqEl0);
+        const bool write_system = msr.Verify() && msr.GetSystemReg() == Core::NCE::TpidrEl0;
+        if (svc.Verify() || read_system || write_system || exclusive.Verify()) {
+            m_nce_trapped_instructions.insert_or_assign(address + offset, instruction);
+            std::memcpy(code.data() + offset, &NceTrapInstruction, sizeof(u32));
+        }
+    }
+}
+
+u32 KProcess::ReadNceInstruction(u64 address, u32 instruction) const {
+    if (instruction != NceTrapInstruction) {
+        return instruction;
+    }
+    std::shared_lock lock{m_nce_instruction_mutex};
+    const auto it = m_nce_trapped_instructions.find(address);
+    return it == m_nce_trapped_instructions.end() ? instruction : it->second;
+}
+#endif
+
 void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr) {
+#ifdef HAS_NCE
+    if (this->IsApplication() && Settings::IsNceWithSubpages()) {
+        const auto& code = code_set.CodeSegment();
+        PatchNceInstructions(GetInteger(base_addr + code.addr),
+                             std::span{code_set.memory}.subspan(code.offset, code.size));
+    }
+#endif
     const auto ReprotectSegment = [&](const CodeSet::Segment& segment, Svc::MemoryPermission permission) {
         m_page_table.SetProcessMemoryPermission(segment.addr + base_addr, segment.size, permission);
     };
@@ -1309,7 +1353,7 @@ void KProcess::InitializeInterfaces(KernelCore& kernel) {
 #ifdef HAS_NCE
     if (this->IsApplication() && Settings::IsNceEnabled()) {
         for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++)
-            m_arm_interfaces[i] = std::make_unique<Core::ArmNce>(kernel.System(), true, i);
+            m_arm_interfaces[i] = std::make_unique<Core::ArmNce>(kernel.System(), true, this, i);
     } else
 #endif
         if (this->Is64Bit()) {

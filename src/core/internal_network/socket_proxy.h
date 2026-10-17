@@ -63,6 +63,12 @@ public:
 
     Errno SetKeepAlive(bool enable) override;
 
+    Errno SetNoDelay(bool enable) override;
+
+    std::pair<bool, Errno> GetNoDelay() override;
+
+    Errno SetIpOption(IpOption option, int value) override;
+
     Errno SetSndBuf(u32 value) override;
 
     Errno SetRcvBuf(u32 value) override;

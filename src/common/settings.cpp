@@ -117,8 +117,9 @@ void LogSettings() {
     std::deque<std::string> settings_list;
     for (auto& [category, settings] : values.linkage.by_category) {
         for (const auto& setting : settings) {
-            // Hide the token secret, for security reasons.
-            if (setting->Id() != values.eden_token.Id()) {
+            // Keep account credentials out of diagnostic logs.
+            if (setting->Id() != values.eden_token.Id() &&
+                setting->Id() != values.switchnet_password.Id()) {
                 auto const is_default = setting->ToString() == setting->DefaultToString();
                 auto const name = fmt::format(
                     "{:c}{:c} {}.{}",
@@ -184,9 +185,7 @@ bool IsFastmemEnabled() {
     else if (values.cpu_accuracy.GetValue() == CpuAccuracy::Unsafe)
         return bool(values.cpuopt_unsafe_host_mmu);
 #if defined(__linux__) && defined(ARCHITECTURE_arm64)
-    // Only 4kb systems support host MMU right now
-    // TODO: Support this
-    return getpagesize() == 4096;
+    return getpagesize() >= 4096;
 #elif !defined(__APPLE__) && !defined(__ANDROID__) && !defined(_WIN32) && !defined(__linux__) && !defined(__FreeBSD__)
     return false;
 #else
@@ -212,6 +211,15 @@ void SetNceEnabled(bool is_39bit) {
 
 bool IsNceEnabled() {
     return is_nce_enabled;
+}
+
+bool IsNceWithSubpages() {
+#if defined(__linux__) && defined(ARCHITECTURE_arm64)
+    static const bool large_pages = getpagesize() > 4096;
+    return is_nce_enabled && large_pages;
+#else
+    return false;
+#endif
 }
 
 static u64 current_program_id = 0;

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -21,8 +22,10 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -75,7 +78,7 @@ SOCKET GetInterruptSocket() {
 }
 
 sockaddr TranslateFromSockAddrIn(SockAddrIn input) {
-    sockaddr_in result;
+    sockaddr_in result{};
 
 #ifdef __unix__
     result.sin_len = sizeof(result);
@@ -202,10 +205,18 @@ void InterruptSocketOperations() {
 }
 
 void AcknowledgeInterrupt() {
-    u8 value = 0;
-    ssize_t ret = read(interrupt_pipe_fd[0], &value, sizeof(value));
-    if (ret != 1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOG_ERROR(Network, "Failed to acknowledge interrupt on shutdown");
+    // More than one shutdown/cancellation can signal the pipe. Drain all signals
+    // before the next session, or poll keeps waking for an old cancellation.
+    std::array<u8, 64> values{};
+    for (;;) {
+        const ssize_t ret = read(interrupt_pipe_fd[0], values.data(), values.size());
+        if (ret > 0)
+            continue;
+        if (ret < 0 && errno == EINTR)
+            continue;
+        if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            LOG_ERROR(Network, "Failed to acknowledge interrupt on shutdown");
+        break;
     }
 }
 
@@ -214,7 +225,10 @@ SOCKET GetInterruptSocket() {
 }
 
 sockaddr TranslateFromSockAddrIn(SockAddrIn input) {
-    sockaddr_in result;
+    sockaddr_in result{};
+#ifdef __APPLE__
+    result.sin_len = sizeof(result);
+#endif
 
     switch (static_cast<Domain>(input.family)) {
     case Domain::INET:
@@ -1052,6 +1066,34 @@ Errno Socket::SetKeepAlive(bool enable) {
     return SetSockOpt<u32>(fd, SO_KEEPALIVE, enable ? 1 : 0);
 }
 
+Errno Socket::SetNoDelay(bool enable) {
+    const int value = enable ? 1 : 0;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&value),
+                   sizeof(value)) != SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+
+Errno Socket::SetIpOption(IpOption option, int value) {
+    const int name = option == IpOption::TTL ? IP_TTL : IP_TOS;
+    if (setsockopt(fd, IPPROTO_IP, name, reinterpret_cast<const char*>(&value), sizeof(value)) !=
+        SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+
+std::pair<bool, Errno> Socket::GetNoDelay() {
+    int value = 0;
+    socklen_t len = sizeof(value);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&value), &len) !=
+        SOCKET_ERROR) {
+        return {value != 0, Errno::SUCCESS};
+    }
+    return {false, GetAndLogLastError()};
+}
+
 Errno Socket::SetBroadcast(bool enable) {
     return SetSockOpt<u32>(fd, SO_BROADCAST, enable ? 1 : 0);
 }
@@ -1065,11 +1107,25 @@ Errno Socket::SetRcvBuf(u32 value) {
 }
 
 Errno Socket::SetSndTimeo(u32 value) {
+#ifdef _WIN32
     return SetSockOpt(fd, SO_SNDTIMEO, value);
+#else
+    // Guest/Windows timeout is milliseconds; POSIX sockets require timeval.
+    const timeval timeout{static_cast<time_t>(value / 1000),
+                          static_cast<suseconds_t>((value % 1000) * 1000)};
+    return SetSockOpt(fd, SO_SNDTIMEO, timeout);
+#endif
 }
 
 Errno Socket::SetRcvTimeo(u32 value) {
+#ifdef _WIN32
     return SetSockOpt(fd, SO_RCVTIMEO, value);
+#else
+    // Guest/Windows timeout is milliseconds; POSIX sockets require timeval.
+    const timeval timeout{static_cast<time_t>(value / 1000),
+                          static_cast<suseconds_t>((value % 1000) * 1000)};
+    return SetSockOpt(fd, SO_RCVTIMEO, timeout);
+#endif
 }
 
 Errno Socket::SetNonBlock(bool enable) {

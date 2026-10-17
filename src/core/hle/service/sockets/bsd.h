@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 #include <variant>
@@ -28,6 +31,8 @@ class Socket;
 
 namespace Service::Sockets {
 
+class DeferredPollWaker;
+
 class BSD_USA final : public ServiceFramework<BSD_USA> {
 public:
     explicit BSD_USA(Core::System& system_, const char* name, bool is_user);
@@ -40,14 +45,33 @@ public:
     Errno CloseImpl(s32 fd);
     std::optional<std::shared_ptr<Network::SocketBase>> GetSocket(s32 fd);
 
+    /// Lets polls that include an eventfd defer their reply; see DeferredPollWaker.
+    void SetDeferredPollWaker(std::shared_ptr<DeferredPollWaker> waker);
+
 private:
     /// Maximum number of file descriptors
     static constexpr size_t MAX_FD = 128;
 
+    /// An eventfd: a counter guest threads use to wake each other, not a host socket. gRPC's
+    /// event loop polls one alongside its sockets.
+    struct EventFdState {
+        std::mutex mutex;
+        u64 value = 0;
+        bool semaphore = false;
+    };
+
     struct FileDescriptor {
         std::shared_ptr<Network::SocketBase> socket;
+        std::shared_ptr<EventFdState> eventfd;
         s32 flags = 0;
         bool is_connection_based = false;
+        Network::Domain domain = Network::Domain::INET;
+        Network::Type type = Network::Type::DGRAM;
+        Network::Protocol protocol = Network::Protocol::UDP;
+        // Every option value the guest set successfully, keyed by (level << 32 | optname), so
+        // getsockopt can report it back. gRPC sets each option and then reads it to verify,
+        // closing the socket before connecting if the read fails.
+        std::map<u64, std::vector<u8>> set_options;
     };
 
     struct PollWork {
@@ -100,6 +124,7 @@ private:
         u32 flags;
         std::vector<u8> message;
         std::vector<u8> addr;
+        u32 addr_length{};
         s32 ret{};
         Errno bsd_errno{};
     };
@@ -170,7 +195,7 @@ private:
     Errno ShutdownImpl(s32 fd, s32 how);
     std::pair<s32, Errno> RecvImpl(s32 fd, u32 flags, std::vector<u8>& message);
     std::pair<s32, Errno> RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message,
-                                       std::vector<u8>& addr);
+                                       std::vector<u8>& addr, u32& addr_length);
     std::pair<s32, Errno> SendImpl(s32 fd, u32 flags, std::span<const u8> message);
     std::pair<s32, Errno> SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
                                      std::span<const u8> addr);
@@ -180,7 +205,27 @@ private:
 
     void BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept;
 
+    bool PollIncludesEventFd(std::span<const u8> read_buffer, s32 nfds);
+    /// Whether this request is a deferred poll being re-run.
+    bool IsDeferredPoll(const HLERequestContext& ctx);
+    std::pair<s32, Errno> PollOnce(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
+                                   s32 nfds);
+    void PollWithEventFd(HLERequestContext& ctx, s32 nfds, s32 timeout);
+    std::shared_ptr<EventFdState> GetEventFd(s32 fd);
+
+    struct DeferredPoll {
+        std::chrono::steady_clock::time_point deadline;
+        std::chrono::steady_clock::time_point last_run;
+        /// The pollfd array as the guest sent it; see PollWithEventFd.
+        std::vector<u8> pollfds;
+    };
+    std::shared_ptr<DeferredPollWaker> deferred_poll_waker;
+    std::mutex deferred_polls_mutex;
+    std::map<const HLERequestContext*, DeferredPoll> deferred_polls;
+
     static inline std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+    static inline std::mutex fd_table_mutex; // Protects access to the file_descriptors array
+
 
     /// Callback to parse and handle a received wifi packet.
     void OnProxyPacketReceived(const Network::ProxyPacket& packet);

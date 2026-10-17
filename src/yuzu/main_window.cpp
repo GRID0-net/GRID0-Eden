@@ -11,6 +11,9 @@
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/settings.h"
+#include "yuzu/grid0_friends_dialog.h"
+#include "yuzu/grid0_patch_update.h"
+#include "core/hle/service/sockets/private_server.h"
 #include "common/settings_enums.h"
 #include "frontend_common/settings_generator.h"
 #include "render/performance_overlay.h"
@@ -423,6 +426,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     RestoreUIState();
 
     ConnectMenuEvents();
+    Grid0::CheckPatchesOnBoot(this);
     ConnectWidgetEvents();
 
     QtCommon::SetupHID();
@@ -1476,6 +1480,25 @@ void MainWindow::ConnectWidgetEvents() {
 }
 
 void MainWindow::ConnectMenuEvents() {
+    auto* grid0_menu = ui->menubar->addMenu(tr("GRID0+"));
+    auto* friends = grid0_menu->addAction(tr("Friends…"));
+    friends->setShortcut(QKeySequence(tr("Ctrl+Shift+F")));
+    connect(friends, &QAction::triggered, this, [this] {
+        if (!grid0_friends_dialog) {
+            grid0_friends_dialog = new Grid0FriendsDialog(this);
+        }
+        grid0_friends_dialog->show();
+        grid0_friends_dialog->raise();
+        grid0_friends_dialog->activateWindow();
+    });
+    connect(grid0_menu->addAction(tr("Account and server…")), &QAction::triggered,
+            this, &MainWindow::OnConfigure);
+    auto* diagnostics = grid0_menu->addAction(tr("Network diagnostics"));
+    diagnostics->setCheckable(true);
+    connect(diagnostics, &QAction::toggled, this, &Service::Sockets::SetPrivateServerTraceEnabled);
+    connect(grid0_menu->addAction(tr("Check for patch updates…")), &QAction::triggered,
+            this, [this] { Grid0::CheckPatchesOnBoot(this); });
+
     const auto connect_menu = [&]<typename Fn>(QAction* action, const Fn& event_fn) {
         connect(action, &QAction::triggered, this, event_fn);
         // Add actions to this window so that hiding menus in fullscreen won't disable them

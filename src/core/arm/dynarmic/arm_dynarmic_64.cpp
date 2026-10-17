@@ -45,7 +45,13 @@ std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
         m_memory.ReadBlock(aligned_vaddr, &cached_code_page, sizeof(cached_code_page));
         last_code_addr = aligned_vaddr;
     }
-    return cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+    const u32 instruction = cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+#ifdef HAS_NCE
+    if (m_parent.m_nce_stepping) {
+        return m_process->ReadNceInstruction(vaddr, instruction);
+    }
+#endif
+    return instruction;
 }
 
 void DynarmicCallbacks64::MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std::size_t size) {
@@ -89,6 +95,9 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
     last_code_addr = u64(-1); //invalidate cached page
+    if (m_parent.m_nce_stepping) {
+        m_parent.m_system.DeviceMemory().buffer.FlushInstructionCache(0, std::numeric_limits<size_t>::max());
+    }
     switch (op) {
     case Dynarmic::A64::InstructionCacheOperation::InvalidateByVAToPoU: {
         static constexpr u64 ICACHE_LINE_SIZE = 64;
@@ -341,7 +350,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     default:
         break;
     }
-    if (!Settings::IsFastmemEnabled()) {
+    if (m_nce_stepping) {
+        config.optimizations &= ~Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor;
+    }
+    if (m_nce_stepping || !Settings::IsFastmemEnabled()) {
         config.fastmem_pointer = std::nullopt;
         config.fastmem_exclusive_access = false;
     }
@@ -354,7 +366,10 @@ HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
 }
 
 HaltReason ArmDynarmic64::StepThread(Kernel::KThread* thread) {
-    m_jit->ClearExclusiveState();
+    if (!m_nce_stepping || m_step_thread != thread) {
+        m_jit->ClearExclusiveState();
+    }
+    m_step_thread = thread;
     return TranslateHaltReason(m_jit->Step());
 }
 
@@ -393,6 +408,11 @@ ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProc
 }
 
 ArmDynarmic64::~ArmDynarmic64() = default;
+
+void ArmDynarmic64::EnableNceStepping() {
+    m_nce_stepping = true;
+    MakeJit(nullptr, 39);
+}
 
 void ArmDynarmic64::SetTpidrroEl0(u64 value) {
     m_cb->m_tpidrro_el0 = value;
@@ -444,6 +464,7 @@ void ArmDynarmic64::ClearInstructionCache() {
 }
 
 void ArmDynarmic64::InvalidateCacheRange(u64 addr, std::size_t size) {
+    m_cb->last_code_addr = u64(-1);
     m_jit->InvalidateCacheRange(addr, size);
 }
 

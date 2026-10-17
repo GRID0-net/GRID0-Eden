@@ -8,6 +8,7 @@
 #include "common/logging.h"
 #include "common/random.h"
 #include "common/settings.h"
+#include "common/sparse_large_vector.h"
 #include "core/core.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
@@ -38,13 +39,16 @@ struct PatchCollection {
     }
 
     std::vector<Core::NCE::Patcher>* GetPatchers() {
-        if (is_application && Settings::IsNceEnabled()) {
+        if (is_application && Settings::IsNceEnabled() && !Settings::IsNceWithSubpages()) {
             return &patchers;
         }
         return nullptr;
     }
 
     size_t GetTotalPatchSize() const {
+        if (Settings::IsNceWithSubpages()) {
+            return 0;
+        }
         size_t total_size{};
 #ifdef HAS_NCE
         for (auto& patcher : patchers) {
@@ -233,6 +237,10 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     // TODO: this is bad form of ASLR, it sucks
     std::uintptr_t aslr_offset = ((::Settings::values.rng_seed_enabled.GetValue()
         ? ::Settings::values.rng_seed.GetValue() : Common::Random::Random64(0)) << 12) & 0xfff000;
+
+    if (Settings::IsNceWithSubpages()) {
+        aslr_offset = Common::AlignDown(aslr_offset, Common::HostPageSize);
+    }
 
     // Setup the process code layout
     if (process.LoadFromMetadata(system.Kernel(), metadata, code_size, fastmem_base, aslr_offset).IsError()) {

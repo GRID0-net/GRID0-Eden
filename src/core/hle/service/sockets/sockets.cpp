@@ -4,8 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <tuple>
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/deferred_poll_waker.h"
 #include "core/hle/service/sockets/nsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets.h"
@@ -64,11 +66,17 @@ public:
 void LoopProcess(Core::System& system) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
+    Kernel::KEvent* deferral_event{};
+    server_manager->ManageDeferral(&deferral_event);
+    const auto waker = std::make_shared<DeferredPollWaker>(system, deferral_event);
+    for (const auto& [name, is_user, sessions] :
+         {std::tuple{"bsd:s", false, 0x7e}, {"bsd:u", true, 0x0f}, {"bsd:a", true, 0x17}}) {
+        auto bsd = std::make_shared<BSD_USA>(system, name, is_user);
+        bsd->SetDeferredPollWaker(waker);
+        server_manager->RegisterNamedService(name, std::move(bsd), sessions);
+    }
     server_manager->RegisterNamedService("ethc:c", std::make_shared<ETHC_C>(system), 5);
     server_manager->RegisterNamedService("ethc:i", std::make_shared<ETHC_I>(system), 5);
-    server_manager->RegisterNamedService("bsd:s", std::make_shared<BSD_USA>(system, "bsd:s", false), 0x7E);
-    server_manager->RegisterNamedService("bsd:u", std::make_shared<BSD_USA>(system, "bsd:u", true), 0x0f);
-    server_manager->RegisterNamedService("bsd:a", std::make_shared<BSD_USA>(system, "bsd:a", true), 0x17);
     server_manager->RegisterNamedService("bsd:nu", std::make_shared<BSD_NU>(system), 4);
     server_manager->RegisterNamedService("bsdcfg", std::make_shared<BSDCFG>(system, "bsdcfg"));
     server_manager->RegisterNamedService("ifcfg", std::make_shared<BSDCFG>(system, "ifcfg"));

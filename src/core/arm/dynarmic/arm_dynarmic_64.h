@@ -91,6 +91,7 @@ public:
     void GetSvcArguments(std::span<uint64_t, 8> args) const override;
     void SetSvcArguments(std::span<const uint64_t, 8> args) override;
     u32 GetSvcNumber() const override;
+    void EnableNceStepping();
 
     void SignalInterrupt(Kernel::KThread* thread) override;
     void ClearInstructionCache() override;
@@ -106,6 +107,8 @@ private:
 
 private:
     friend class DynarmicCallbacks64;
+    bool m_nce_stepping{};
+    Kernel::KThread* m_step_thread{};
 
     void MakeJit(Common::PageTable* page_table, std::size_t address_space_bits);
     std::optional<DynarmicCallbacks64> m_cb{};

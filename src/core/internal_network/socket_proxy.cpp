@@ -272,6 +272,18 @@ Errno ProxySocket::SetKeepAlive(bool enable) {
     return Errno::SUCCESS;
 }
 
+Errno ProxySocket::SetNoDelay(bool enable) {
+    return Errno::SUCCESS;
+}
+
+Errno ProxySocket::SetIpOption(IpOption option, int value) {
+    return Errno::SUCCESS;
+}
+
+std::pair<bool, Errno> ProxySocket::GetNoDelay() {
+    return {true, Errno::SUCCESS};
+}
+
 Errno ProxySocket::SetRcvBuf(u32 value) {
     return SetSockOpt(fd, SO_RCVBUF, value);
 }

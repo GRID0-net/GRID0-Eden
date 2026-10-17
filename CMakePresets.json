@@ -1,0 +1,193 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 31,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "grid0-common",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "EDEN_INSTALL_GIT_HOOKS": "OFF",
+        "ENABLE_WEB_SERVICE": "ON",
+        "DYNARMIC_TESTS": "OFF",
+        "YUZU_TESTS": "OFF",
+        "ENABLE_WERROR": "OFF"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "GRID0-Eden on Linux",
+      "inherits": "grid0-common",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "YUZU_USE_BUNDLED_QT": "OFF"
+      }
+    },
+    {
+      "name": "windows",
+      "displayName": "GRID0-Eden on Windows (MSVC)",
+      "inherits": "grid0-common",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "YUZU_USE_BUNDLED_QT": "ON",
+        "YUZU_USE_BUNDLED_FFMPEG": "ON",
+        "YUZU_USE_BUNDLED_SDL3": "ON",
+        "YUZU_USE_BUNDLED_OPENSSL": "ON",
+        "ENABLE_OPENGL": "OFF"
+      }
+    },
+    {
+      "name": "windows-mingw",
+      "displayName": "GRID0-Eden on Windows (MSYS2)",
+      "inherits": "grid0-common",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "YUZU_USE_BUNDLED_QT": "OFF",
+        "YUZU_USE_BUNDLED_SDL3": "OFF",
+        "YUZU_USE_BUNDLED_OPENSSL": "OFF",
+        "YUZU_USE_BUNDLED_FFMPEG": "OFF",
+        "ENABLE_OPENGL": "OFF",
+        "VulkanHeaders_FORCE_BUNDLED": "ON",
+        "VulkanUtilityLibraries_FORCE_BUNDLED": "ON"
+      }
+    },
+    {
+      "name": "asahi",
+      "displayName": "Legacy Linux build directory (asahi)",
+      "inherits": "linux",
+      "cacheVariables": {
+        "YUZU_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-x86_64",
+      "displayName": "GRID0+ Linux x86_64 cross build",
+      "inherits": "grid0-common",
+      "toolchainFile": "${sourceDir}/CMakeModules/toolchains/LinuxX86_64.cmake",
+      "cacheVariables": {
+        "YUZU_USE_BUNDLED_QT": "OFF",
+        "ENABLE_OPENGL": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows-x86_64",
+      "displayName": "GRID0+ Windows x86_64 MinGW cross build",
+      "inherits": "grid0-common",
+      "toolchainFile": "${sourceDir}/CMakeModules/toolchains/WindowsX86_64.cmake",
+      "cacheVariables": {
+        "YUZU_USE_BUNDLED_QT": "OFF",
+        "ENABLE_OPENGL": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "asahi",
+      "configurePreset": "asahi",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-x86_64",
+      "configurePreset": "linux-x86_64",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows-x86_64",
+      "configurePreset": "windows-x86_64",
+      "jobs": 2,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asahi",
+      "configurePreset": "asahi",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

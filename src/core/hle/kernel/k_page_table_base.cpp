@@ -1532,6 +1532,14 @@ Result KPageTableBase::UnmapInsecureMemory(KProcessAddress address, size_t size)
 KProcessAddress KPageTableBase::FindFreeArea(KProcessAddress region_start, size_t region_num_pages,
                                              size_t num_pages, size_t alignment, size_t offset,
                                              size_t guard_pages) const {
+    if (Settings::IsNceWithSubpages() && alignment < Common::HostPageSize && offset == 0 &&
+        num_pages >= Common::HostPageSize / PageSize) {
+        const auto aligned = FindFreeArea(region_start, region_num_pages, num_pages,
+                                          Common::HostPageSize, offset, guard_pages);
+        if (aligned != 0) {
+            return aligned;
+        }
+    }
     KProcessAddress address = 0;
 
     if (num_pages <= region_num_pages) {
@@ -1635,9 +1643,23 @@ Result KPageTableBase::AllocateAndMapPagesImpl(PageLinkedList* page_list, KProce
     // Create a page group to hold the pages we allocate.
     KPageGroup pg(m_system.Kernel(), m_block_info_manager);
 
-    // Allocate the pages.
-    R_TRY(
-        m_system.Kernel().MemoryManager().AllocateAndOpen(std::addressof(pg), num_pages, m_allocate_option));
+    // Prefer a host-aligned physical run so complete subpage groups can execute natively.
+    auto& memory_manager = m_system.Kernel().MemoryManager();
+    if (Settings::IsNceWithSubpages() && num_pages >= Common::HostPageSize / PageSize &&
+        Common::IsAligned(GetInteger(address), Common::HostPageSize)) {
+        const auto physical = memory_manager.AllocateAndOpenContinuous(
+            num_pages, Common::HostPageSize / PageSize, m_allocate_option);
+        if (physical != 0) {
+            const auto result = pg.AddBlock(physical, num_pages);
+            if (result.IsError()) {
+                memory_manager.Close(physical, num_pages);
+                return result;
+            }
+        }
+    }
+    if (pg.GetNumPages() == 0) {
+        R_TRY(memory_manager.AllocateAndOpen(std::addressof(pg), num_pages, m_allocate_option));
+    }
 
     // Ensure that the page group is closed when we're done working with it.
     SCOPE_EXIT {
