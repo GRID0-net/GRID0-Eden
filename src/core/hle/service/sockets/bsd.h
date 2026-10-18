@@ -177,6 +177,8 @@ private:
     void Close(HLERequestContext& ctx);
     void DuplicateSocket(HLERequestContext& ctx);
     void EventFd(HLERequestContext& ctx);
+    void RecvMMsg(HLERequestContext& ctx);
+    void SendMMsg(HLERequestContext& ctx);
 
     template <typename Work>
     void ExecuteWork(HLERequestContext& ctx, Work work);
