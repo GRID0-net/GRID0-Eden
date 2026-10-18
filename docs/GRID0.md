@@ -112,6 +112,26 @@ Cross-built dependencies and executables still need validation on their target
 platforms. Splatoon 3 rendering, login, friends joining, NAT traversal, BCAT and
 matches also require a game dump and live GRID0 test accounts.
 
+### Linux x86_64 cross-build from Fedora
+
+Native Clang and LLD can build x86_64 binaries on an ARM64 host. Install those
+along with the native build tools listed above, including Qt tools that match
+the target Qt version. The SDK helper downloads target GCC headers, runtime
+libraries and Qt packages into `.cache`; it does not install system packages.
+
+```sh
+tools/grid0/bootstrap_linux_x86_64_sdk.sh
+tools/grid0/build_linux_x86_64.sh
+tools/grid0/bootstrap_appimage.sh
+python3 tools/grid0/package_linux.py --build-dir build/linux-x86_64 \
+    --sysroot "$PWD/.cache/linux-x86_64-sdk" --bundle-glibc
+```
+
+The AppImage and SHA-256 checksum go in `build/linux-x86_64/package`. Packaging
+reads target ELF dependencies without running them, so it also works across
+architectures. Graphics drivers are supplied by the destination system. See
+[Build.md](Build.md#making-an-appimage) for native Linux packaging.
+
 ### Windows cross-build from Fedora
 
 The helper scripts download Fedora's MinGW cross-compiler and Windows Qt
@@ -156,5 +176,10 @@ The CLI's SDL callback state, continuation results and input lifetime were repai
 to allow the headless NRO to run and exit cleanly. No commercial game or live GRID0
 account was available for validation. Windows x86_64 GUI, CLI and room-server
 executables cross-compile with MinGW. The package helper checks their architecture
-and DLL imports; startup and gameplay still need Windows testing. The Linux
-x86_64 cross preset has not been built yet.
+and DLL imports; startup and gameplay still need Windows testing. Linux x86_64
+GUI, CLI and room-server executables also cross-compile with native Clang and LLD.
+Both Linux targets can be packaged as AppImages with their Qt plugins, shared
+libraries and matching C runtime. The ARM64 AppImage runs the NCE guest smoke test
+on the 16 KiB host, including in an Ubuntu 22.04 container. The existing shutdown
+unmap assertion also appears in the unpackaged binary. Linux x86_64 startup and
+gameplay still need testing on an x86_64 machine.

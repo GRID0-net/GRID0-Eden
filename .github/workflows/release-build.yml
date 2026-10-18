@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Build and upload a release package
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - name: Record source commit
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.target == 'all' && '["linux-aarch64","linux-x86_64","windows-x86_64"]' || format('["{0}"]', inputs.target)) }}
+    runs-on: ${{ matrix.target == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container: fedora:44
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc gcc-c++ cmake ninja-build python3 pkgconf-pkg-config \
+            curl tar gzip unzip zip patch which cpio rpm dnf-plugins-core \
+            glslang qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtcharts-devel \
+            qt6-linguist qt6-qttools-devel qt6-qtsvg qt6-qtimageformats qt6-qtwayland \
+            SDL3-devel openssl-devel zlib-devel libzstd-devel libusb1-devel \
+            libdrm-devel libva-devel libXext-devel wayland-devel \
+            alsa-lib-devel pulseaudio-libs-devel patchelf squashfs-tools
+
+      - name: Check build selection
+        run: |
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          case "$TARGET" in
+            linux-aarch64|linux-x86_64|windows-x86_64) ;;
+            *) echo "Unknown target: $TARGET" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('cpmfile.json') }}
+          restore-keys: cpm-${{ runner.arch }}-${{ matrix.target }}-
+
+      - name: Build Linux
+        if: startsWith(matrix.target, 'linux-')
+        run: |
+          cmake --preset linux \
+            -DYUZU_USE_BUNDLED_FFMPEG=ON -DYUZU_USE_BUNDLED_SDL3=OFF \
+            -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          cmake --build --preset linux --target yuzu yuzu-cmd yuzu_room_standalone --parallel 2
+
+      - name: Package Linux AppImage
+        if: startsWith(matrix.target, 'linux-')
+        run: |
+          tools/grid0/bootstrap_appimage.sh
+          python3 tools/grid0/package_linux.py --build-dir build/linux --bundle-glibc
+          mkdir -p dist-release
+          cp build/linux/package/*.AppImage build/linux/package/*.AppImage.sha256 dist-release/
+          (cd dist-release && sha256sum --check ./*.sha256)
+
+      - name: Build Windows
+        if: matrix.target == 'windows-x86_64'
+        run: |
+          tools/grid0/bootstrap_windows_sdk.sh
+          tools/grid0/build_windows.sh --parallel 2
+
+      - name: Package Windows ZIP
+        if: matrix.target == 'windows-x86_64'
+        run: |
+          export PATH="$PWD/.cache/windows-sdk/usr/bin:$PATH"
+          python3 tools/grid0/package_windows.py --zip \
+            --sysroot "$PWD/.cache/windows-sdk/usr/x86_64-w64-mingw32/sys-root/mingw"
+          mkdir -p dist-release
+          cp build/windows-x86_64/package/*.zip build/windows-x86_64/package/*.zip.sha256 dist-release/
+          (cd dist-release && sha256sum --check ./*.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist-release/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    needs: [source, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist-release
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+        run: |
+          python3 tools/grid0/publish_release.py \
+            --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory dist-release

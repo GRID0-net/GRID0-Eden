@@ -32,6 +32,36 @@ cmake --preset linux -B build/linux-clang -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_C
 cmake --build build/linux-clang
 ```
 
+### making an AppImage
+
+want a single file you can share? install `patchelf`, `squashfs-tools` and `curl`,
+then package your Linux build:
+
+```sh
+./tools/grid0/bootstrap_appimage.sh
+python3 tools/grid0/package_linux.py --build-dir build/linux --bundle-glibc
+```
+
+you'll get `GRID0-Eden-aarch64.AppImage` or `GRID0-Eden-x86_64.AppImage` in
+`build/linux/package`, along with its checksum. the packager follows the build's
+architecture, includes Qt and the runtime libraries, and leaves GPU drivers to
+the machine running it. it doesnt include games, keys or your account settings.
+
+make it executable and run it:
+
+```sh
+chmod +x GRID0-Eden-*.AppImage
+./GRID0-Eden-x86_64.AppImage
+```
+
+use the `aarch64` file instead if you're on arm64. if FUSE isnt available, run
+with `APPIMAGE_EXTRACT_AND_RUN=1` before the filename. `--cli` opens the command
+line build and `--room` runs the room server.
+
+`--bundle-glibc` includes the matching C runtime, which helps when you're building
+on a newer distro than the people using it. you can leave it out if you're
+building on an older distro and want to use the destination machine's glibc.
+
 ## windows
 
 ### Visual Studio / PowerShell
@@ -111,6 +141,31 @@ the cross-build uses `build/windows-x86_64`, separate from native Windows builds
 there's also a `linux-x86_64` cross preset if you're targeting x86_64 Linux from
 another architecture. [GRID0.md](GRID0.md#cross-compilation-from-linux) has
 the SDK setup and packaging commands.
+
+## building releases on GitHub
+
+push these changes to the repo's default branch, then tag the version you want
+to build. for example, after committing your changes:
+
+```sh
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+open **Actions**, pick **Release everything**, hit **Run workflow** and enter
+that tag. it'll build the Windows x86_64 ZIP and both Linux AppImages, then put
+them and their checksums in the same release. it creates the release if needed
+and publishes it once the uploads finish. no extra secrets to set up.
+
+there are separate **Release Windows x86_64**, **Release Linux x86_64** and
+**Release Linux ARM64** workflows too. use the same tag to add a platform to an
+existing release, or rebuild just that package. reruns replace that platform's
+files and leave your release notes alone. if you've enabled immutable releases,
+use **Release everything** with a new tag so all the files are uploaded before
+the release gets locked.
+
+the build packages also stay available as workflow artifacts if a release upload
+fails. the workflows only run when you start them yourself.
 
 ## a couple of useful things
 
