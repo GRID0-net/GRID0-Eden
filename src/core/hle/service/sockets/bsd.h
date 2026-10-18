@@ -18,6 +18,7 @@
 #include "common/socket_types.h"
 #include "core/hle/service/service.h"
 #include "core/hle/service/sockets/sockets.h"
+#include "core/hle/service/sockets/eventfd.h"
 #include "network/network.h"
 
 namespace Core {
@@ -51,14 +52,6 @@ public:
 private:
     /// Maximum number of file descriptors
     static constexpr size_t MAX_FD = 128;
-
-    /// An eventfd: a counter guest threads use to wake each other, not a host socket. gRPC's
-    /// event loop polls one alongside its sockets.
-    struct EventFdState {
-        std::mutex mutex;
-        u64 value = 0;
-        bool semaphore = false;
-    };
 
     struct FileDescriptor {
         std::shared_ptr<Network::SocketBase> socket;
@@ -177,8 +170,11 @@ private:
     void Close(HLERequestContext& ctx);
     void DuplicateSocket(HLERequestContext& ctx);
     void EventFd(HLERequestContext& ctx);
+    void RegisterClientShared(HLERequestContext& ctx);
+    void UnsupportedOperation(HLERequestContext& ctx);
     void RecvMMsg(HLERequestContext& ctx);
     void SendMMsg(HLERequestContext& ctx);
+    void MMsg(HLERequestContext& ctx, bool receive);
 
     template <typename Work>
     void ExecuteWork(HLERequestContext& ctx, Work work);

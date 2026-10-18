@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <map>
 #include <mutex>
 
 #include "common/logging.h"
@@ -150,6 +151,31 @@ bool TakePrivateServerTrace() {
         }
     }
     return false;
+}
+
+namespace {
+std::mutex redirect_mutex;
+std::string redirect_server;
+std::map<std::string, std::string> redirect_hosts;
+}
+
+void RememberRedirectedHost(const std::string& ip, const std::string& host) {
+    std::scoped_lock lock{redirect_mutex};
+    const auto server = PrivateServerAddress();
+    if (redirect_server != server || redirect_hosts.size() >= 256) {
+        redirect_hosts.clear();
+        redirect_server = server;
+    }
+    redirect_hosts[ip] = host;
+}
+
+std::string RedirectedHostForIp(const std::string& ip) {
+    std::scoped_lock lock{redirect_mutex};
+    if (redirect_server != PrivateServerAddress()) {
+        return {};
+    }
+    const auto it = redirect_hosts.find(ip);
+    return it == redirect_hosts.end() ? std::string{} : it->second;
 }
 
 } // namespace Service::Sockets

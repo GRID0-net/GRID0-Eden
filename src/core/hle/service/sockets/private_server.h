@@ -30,6 +30,9 @@ std::optional<std::string> PrivateServerRedirect(std::string_view host);
  * that fails to go online stops. The trace is logged at Warning, so it is in the log even with the
  * default filter, which hides every other socket call.
  */
+void RememberRedirectedHost(const std::string& ip, const std::string& host);
+std::string RedirectedHostForIp(const std::string& ip);
+
 void ArmPrivateServerTrace();
 /// Persistent diagnostic tracing, rate-limited per second; off by default.
 void SetPrivateServerTraceEnabled(bool enabled);

@@ -5,9 +5,9 @@
 #include "migration_worker.h"
 
 #include <filesystem>
-#include <QMap>
-#include <boost/algorithm/string/predicate.hpp>
-#include <boost/algorithm/string/replace.hpp>
+#include <stdexcept>
+#include <vector>
+#include <boost/algorithm/string/case_conv.hpp>
 
 #include "common/fs/path_util.h"
 
@@ -18,11 +18,10 @@ MigrationWorker::MigrationWorker(const Emulator selected_emu_, const bool clear_
 
 void MigrationWorker::process() {
     namespace fs = std::filesystem;
-    constexpr auto copy_options = fs::copy_options::update_existing | fs::copy_options::recursive;
 
-    const fs::path legacy_user_dir = selected_emu.get_user_dir();
-    const fs::path legacy_config_dir = selected_emu.get_config_dir();
-    const fs::path legacy_cache_dir = selected_emu.get_cache_dir();
+    const auto legacy_user_dir = Common::FS::GetLegacyPath(selected_emu.e_user_dir);
+    const auto legacy_config_dir = Common::FS::GetLegacyPath(selected_emu.e_config_dir);
+    const auto legacy_cache_dir = Common::FS::GetLegacyPath(selected_emu.e_cache_dir);
 
     // TODO(crueter): Make these constexpr since they're defaulted
     fs::path eden_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir);
@@ -35,90 +34,94 @@ void MigrationWorker::process() {
     cache_dir.make_preferred();
     shader_dir.make_preferred();
 
+    std::vector<std::pair<fs::path, fs::path>> directories{{legacy_user_dir, eden_dir}};
+#ifndef WIN32
+    if (fs::is_directory(legacy_config_dir)) {
+        directories.emplace_back(legacy_config_dir, config_dir);
+    }
+    if (fs::is_directory(legacy_cache_dir)) {
+        directories.emplace_back(legacy_cache_dir, cache_dir);
+    }
+#endif
+
+    const auto overlaps = [](const fs::path& a, const fs::path& b) {
+        auto first = fs::weakly_canonical(a).generic_string();
+        auto second = fs::weakly_canonical(b).generic_string();
+#ifdef WIN32
+        boost::algorithm::to_lower(first);
+        boost::algorithm::to_lower(second);
+#endif
+        if (!first.ends_with('/')) {
+            first += '/';
+        }
+        if (!second.ends_with('/')) {
+            second += '/';
+        }
+        return first.starts_with(second) || second.starts_with(first);
+    };
+    const auto preserve = [this](const fs::path& destination) {
+        if (!fs::exists(fs::symlink_status(destination))) {
+            return;
+        }
+        auto backup = destination;
+        unsigned int suffix = 0;
+        do {
+            backup = destination;
+            backup += ".pre-grid0-migration-" + std::to_string(++suffix);
+        } while (fs::exists(fs::symlink_status(backup)));
+        fs::rename(destination, backup);
+        success_text.append(tr("\n\nPrevious data was preserved at:\n%1")
+                                .arg(QString::fromStdString(Common::FS::PathToUTF8String(backup))));
+    };
+
     try {
-        fs::remove_all(eden_dir);
-    } catch (fs::filesystem_error& _) {
-        // directory may not exist at this point, that's fine
+        // Check every source before modifying any destination, including shared directories.
+        for (const auto& [source, destination] : directories) {
+            for (const auto& [other_source, other_destination] : directories) {
+                if (overlaps(source, other_destination)) {
+                    throw std::runtime_error("The old and new data directories overlap. "
+                                             "No data was migrated.");
+                }
+            }
+        }
+        for (const auto& [source, destination] : directories) {
+            preserve(destination);
+            fs::create_directories(destination.parent_path());
+            switch (strategy) {
+            case MigrationStrategy::Link:
+                if (!Common::FS::CreateSymlink(source, destination)) {
+                    throw std::runtime_error("The old directory could not be linked.");
+                }
+                break;
+            case MigrationStrategy::Move:
+                fs::rename(source, destination);
+                break;
+            case MigrationStrategy::Copy:
+                fs::copy(source, destination,
+                         fs::copy_options::recursive | fs::copy_options::copy_symlinks);
+                break;
+            default:
+                throw std::runtime_error("Unknown migration strategy.");
+            }
+        }
+
+        // Never clear a cache shared through a linked migration or a custom shader path.
+        if (clear_shader_cache && strategy != MigrationStrategy::Link &&
+            fs::weakly_canonical(shader_dir) == fs::absolute(shader_dir).lexically_normal() &&
+            (shader_dir == eden_dir / "shader" || shader_dir == cache_dir / "shader")) {
+            preserve(shader_dir);
+            fs::create_directories(shader_dir);
+        }
+    } catch (const std::exception& exception) {
+        emit error(tr("Migration stopped: %1\n\nExisting destination data was preserved in "
+                      "any .pre-grid0-migration-* directories beside the original location. "
+                      "Keep those directories.")
+                       .arg(QString::fromUtf8(exception.what())));
+        return;
     }
 
-    switch (strategy) {
-    case MigrationStrategy::Link:
-        // Create symlinks/directory junctions if requested
-
-        // Windows 11 has random permission nonsense to deal with.
-        try {
-            Common::FS::CreateSymlink(legacy_user_dir, eden_dir);
-        } catch (const fs::filesystem_error& e) {
-            emit error(tr("Linking the old directory failed. You may need to re-run with "
-                          "administrative privileges on Windows.\nOS gave error: %1")
-                           .arg(tr(e.what())));
-            std::exit(-1);
-        }
-
-        // Windows doesn't need any more links, because cache and config
-        // are already children of the root directory
-#ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            Common::FS::CreateSymlink(legacy_config_dir, config_dir);
-        }
-
-        if (fs::is_directory(legacy_cache_dir)) {
-            Common::FS::CreateSymlink(legacy_cache_dir, cache_dir);
-        }
-#endif
-
-        success_text.append(tr("\n\nNote that your configuration and data will be shared with %1.\n"
-                               "If this is not desirable, delete the following files:\n%2\n%3\n%4")
-                                .arg(selected_emu.name(), QString::fromStdString(eden_dir.string()),
-                                     QString::fromStdString(config_dir.string()),
-                                     QString::fromStdString(cache_dir.string())));
-
-        break;
-    case MigrationStrategy::Move:
-        // Rename directories if deletion is requested (achieves the same result)
-        fs::rename(legacy_user_dir, eden_dir);
-
-        // Windows doesn't need any more renames, because cache and config
-        // are already children of the root directory
-#ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            fs::rename(legacy_config_dir, config_dir);
-        }
-
-        if (fs::is_directory(legacy_cache_dir)) {
-            fs::rename(legacy_cache_dir, cache_dir);
-        }
-#endif
-        break;
-    case MigrationStrategy::Copy:
-    default:
-        // Default behavior: copy
-        fs::copy(legacy_user_dir, eden_dir, copy_options);
-
-        // Windows doesn't need any more copies, because cache and config
-        // are already children of the root directory
-#ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            fs::copy(legacy_config_dir, config_dir, copy_options);
-        }
-
-        if (fs::is_directory(legacy_cache_dir)) {
-            fs::copy(legacy_cache_dir, cache_dir, copy_options);
-        }
-#endif
-
-        success_text.append(tr("\n\nIf you wish to clean up the files which were left in the old "
-                               "data location, you can do so by deleting the following directory:\n"
-                               "%1")
-                                .arg(QString::fromStdString(legacy_user_dir.string())));
-        break;
+    if (strategy == MigrationStrategy::Link) {
+        success_text.append(tr("\n\nData and settings are shared with %1.").arg(selected_emu.name()));
     }
-
-    // Delete and re-create shader dir
-    if (clear_shader_cache) {
-        fs::remove_all(shader_dir);
-        fs::create_directory(shader_dir);
-    }
-
-    emit finished(success_text, legacy_user_dir.string());
+    emit finished(success_text, Common::FS::PathToUTF8String(legacy_user_dir));
 }

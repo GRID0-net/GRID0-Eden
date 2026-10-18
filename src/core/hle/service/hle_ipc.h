@@ -269,6 +269,21 @@ public:
     /// Helper function to get a span of a buffer using the appropriate buffer descriptor
     [[nodiscard]] std::span<const u8> ReadBuffer(std::size_t buffer_index = 0) const;
 
+    [[nodiscard]] bool SnapshotReadBuffers(std::size_t max_buffer_size);
+
+    // Arm timed wakeups after the request is queued, so an expired deadline cannot be missed.
+    void SetDeferredWakeup(std::function<void()> wakeup) {
+        deferred_wakeup = std::move(wakeup);
+    }
+
+    void NotifyDeferred() {
+        auto wakeup = std::move(deferred_wakeup);
+        deferred_wakeup = {};
+        if (wakeup) {
+            wakeup();
+        }
+    }
+
     /// Helper function to read a copy of a buffer using the appropriate buffer descriptor
     [[nodiscard]] std::vector<u8> ReadBufferCopy(std::size_t buffer_index = 0) const;
 
@@ -414,6 +429,7 @@ private:
 
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_a{};
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_x{};
+    std::array<std::optional<std::vector<u8>>, 3> read_buffer_snapshots{};
 
     std::optional<IPC::CommandHeader> command_header;
     std::optional<IPC::HandleDescriptorHeader> handle_descriptor_header;
@@ -430,6 +446,7 @@ private:
     u32 handles_offset{};
     u32 domain_offset{};
     bool is_deferred = false;
+    std::function<void()> deferred_wakeup;
 };
 
 } // namespace Service

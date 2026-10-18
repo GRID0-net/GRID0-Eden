@@ -1,10 +1,9 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
+
+#include <optional>
 
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
@@ -28,6 +27,8 @@ public:
     ~IServiceCreator() override;
 
 private:
+    void PrefetchDeliveryCache(u64 title_id);
+
     Result CreateBcatService(ClientProcessId process_id, OutInterface<IBcatService> out_interface);
 
     Result CreateDeliveryCacheStorageService(
@@ -36,6 +37,7 @@ private:
     Result CreateDeliveryCacheStorageServiceWithApplicationId(
         u64 application_id, OutInterface<IDeliveryCacheStorageService> out_interface);
 
+    std::optional<u64> prefetched_title;
     std::unique_ptr<BcatBackend> backend;
     Service::FileSystem::FileSystemController& fsc;
 };

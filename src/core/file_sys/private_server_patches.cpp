@@ -57,7 +57,7 @@ bool SameBuildId(std::string_view a, std::string_view b) {
 
 } // namespace
 
-std::vector<std::vector<u8>> GetPrivateServerPatches(std::string_view build_id) {
+std::vector<PrivateServerPatch> GetPrivateServerPatches(std::string_view build_id) {
     if (Service::Sockets::PrivateServerAddress().empty()) {
         return {};
     }
@@ -80,11 +80,11 @@ std::vector<std::vector<u8>> GetPrivateServerPatches(std::string_view build_id) 
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     file_name += ".ips";
 
-    std::vector<std::vector<u8>> patches;
+    std::vector<PrivateServerPatch> patches;
     std::error_code ec;
     const auto categories = PrivateServerPatchesDir() / "exefs_patches";
     if (!std::filesystem::is_directory(categories, ec)) {
-        LOG_WARNING(Loader, "No GRID0+ patches in {}; restart Eden online to download them",
+        LOG_WARNING(Loader, "No GRID0+ patches in {}; restart the app online to download them",
                     Common::FS::PathToUTF8String(PrivateServerPatchesDir()));
         return patches;
     }
@@ -99,7 +99,8 @@ std::vector<std::vector<u8>> GetPrivateServerPatches(std::string_view build_id) 
         if (!in) {
             continue;
         }
-        patches.emplace_back(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        patches.push_back({name, std::vector<u8>(std::istreambuf_iterator<char>(in),
+                                                 std::istreambuf_iterator<char>())});
     }
     return patches;
 }

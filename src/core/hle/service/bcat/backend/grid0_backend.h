@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "core/hle/service/bcat/backend/backend.h"
 
 namespace Service::BCAT {
@@ -18,16 +20,22 @@ public:
     explicit Grid0BcatBackend(DirectoryGetter getter);
     ~Grid0BcatBackend() override;
 
-    bool Synchronize(Kernel::KernelCore& kernel, TitleIDVersion title, ProgressServiceBackend& progress) override;
+    bool Prefetch(Kernel::KernelCore& kernel, TitleIDVersion title,
+                  ProgressServiceBackend& progress) override;
+    bool Synchronize(Kernel::KernelCore& kernel, TitleIDVersion title,
+                     ProgressServiceBackend& progress) override;
     bool SynchronizeDirectory(Kernel::KernelCore& kernel, TitleIDVersion title, std::string name,
                               ProgressServiceBackend& progress) override;
     bool Clear(Kernel::KernelCore& kernel, u64 title_id) override;
-    void SetPassphrase(Kernel::KernelCore& kernel, u64 title_id, const Passphrase& passphrase) override;
-    std::optional<std::vector<u8>> GetLaunchParameter(Kernel::KernelCore& kernel, TitleIDVersion title) override;
+    void SetPassphrase(Kernel::KernelCore& kernel, u64 title_id,
+                       const Passphrase& passphrase) override;
+    std::optional<std::vector<u8>> GetLaunchParameter(Kernel::KernelCore& kernel,
+                                                      TitleIDVersion title) override;
 
 private:
     bool Sync(Kernel::KernelCore& kernel, TitleIDVersion title, const std::string* only_directory,
-              ProgressServiceBackend& progress);
+              ProgressServiceBackend& progress,
+              std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt);
 };
 
 } // namespace Service::BCAT

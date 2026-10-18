@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -612,6 +613,8 @@ int TranslateTypeToNative(Type type) {
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
 #else
 #define NETWORK_PROTOCOL_TRANSLATE_LIST \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(IP) \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(TCP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
@@ -752,8 +755,12 @@ u32 IPv4AddressToInteger(IPv4Address ip_addr) {
 }
 
 std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
-    const std::string& host, const std::optional<std::string>& service) {
+    const std::string& host, const std::optional<std::string>& service,
+    Type socket_type, Protocol protocol) {
     addrinfo hints{};
+    hints.ai_socktype = TranslateTypeToNative(socket_type);
+    hints.ai_protocol = protocol == Protocol::Unspecified ? 0 :
+                        static_cast<int>(TranslateProtocolToNative(protocol));
     hints.ai_family = AF_INET; // Switch only supports IPv4.
     addrinfo* addrinfo;
     s32 gai_err = getaddrinfo(host.c_str(), service.has_value() ? service->c_str() : nullptr, &hints, &addrinfo);
@@ -830,7 +837,48 @@ Socket::~Socket() {
 
 Socket::Socket(Socket&& rhs) noexcept {
     fd = std::exchange(rhs.fd, INVALID_SOCKET);
+    is_non_blocking = rhs.is_non_blocking;
+    is_datagram = rhs.is_datagram;
 }
+
+namespace {
+// Citrosis LAN steering. When the user picks a network interface (a ZeroTier, Tailscale or GRID0
+// LAN adapter, say), the guest believes that adapter is its only network: NIFM hands it that IP.
+// Two things then go wrong on a host with several adapters, and both are fixed here:
+//  - 255.255.255.255 leaves through the host's default route (Wi-Fi), never reaching the overlay.
+//    It is rewritten to the picked adapter's directed broadcast, which is routed onto it.
+//  - A UDP socket bound to the adapter's own unicast IP never receives broadcasts on Linux and
+//    Android. Such binds are widened to INADDR_ANY; the port is unchanged.
+constexpr IPv4Address LimitedBroadcast{255, 255, 255, 255};
+
+std::optional<IPv4Address> SteeredBroadcastAddress() {
+    const auto iface = GetExplicitNetworkInterface();
+    if (!iface) {
+        return std::nullopt;
+    }
+    in_addr broadcast{};
+    broadcast.s_addr = iface->ip_address.s_addr | ~iface->subnet_mask.s_addr;
+    return TranslateIPv4(broadcast);
+}
+
+SockAddrIn SteerDestination(const SockAddrIn& addr) {
+    if (addr.ip != LimitedBroadcast) {
+        return addr;
+    }
+    const auto broadcast = SteeredBroadcastAddress();
+    if (!broadcast) {
+        return addr;
+    }
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+        LOG_INFO(Network, "Steering 255.255.255.255 broadcasts to {} on the picked interface",
+                 IPv4AddressToString(*broadcast));
+    }
+    SockAddrIn steered = addr;
+    steered.ip = *broadcast;
+    return steered;
+}
+} // namespace
 
 template <typename T>
 std::pair<T, Errno> Socket::GetSockOpt(SOCKET fd_so, int option) {
@@ -855,6 +903,7 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
 }
 
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
+    is_datagram = type == Type::DGRAM;
     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
     if (fd != INVALID_SOCKET) {
         return Errno::SUCCESS;
@@ -902,6 +951,9 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
 }
 
 Errno Socket::Connect(SockAddrIn addr_in) {
+    if (is_datagram) {
+        addr_in = SteerDestination(addr_in);
+    }
     const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
     if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
         return Errno::SUCCESS;
@@ -931,6 +983,12 @@ std::pair<SockAddrIn, Errno> Socket::GetSockName() {
 }
 
 Errno Socket::Bind(SockAddrIn addr) {
+    if (is_datagram) {
+        if (const auto iface = GetExplicitNetworkInterface();
+            iface && addr.ip == TranslateIPv4(iface->ip_address)) {
+            addr.ip = IPv4Address{};
+        }
+    }
     const sockaddr addr_in = TranslateFromSockAddrIn(addr);
     if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
         return Errno::SUCCESS;
@@ -971,11 +1029,14 @@ Errno Socket::Shutdown(ShutdownHow how) {
 }
 
 std::pair<s32, Errno> Socket::Recv(int flags, std::span<u8> message) {
-    ASSERT(flags == 0);
+    if ((flags & ~FLAG_MSG_PEEK) != 0) {
+        return {-1, Errno::INVAL};
+    }
+    const int native_flags = (flags & FLAG_MSG_PEEK) != 0 ? MSG_PEEK : 0;
     ASSERT(message.size() < static_cast<size_t>((std::numeric_limits<int>::max)()));
 
     const auto result =
-        recv(fd, reinterpret_cast<char*>(message.data()), static_cast<int>(message.size()), 0);
+        recv(fd, reinterpret_cast<char*>(message.data()), static_cast<int>(message.size()), native_flags);
     if (result != SOCKET_ERROR) {
         return {static_cast<s32>(result), Errno::SUCCESS};
     }
@@ -984,7 +1045,10 @@ std::pair<s32, Errno> Socket::Recv(int flags, std::span<u8> message) {
 }
 
 std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAddrIn* addr) {
-    ASSERT(flags == 0);
+    if ((flags & ~FLAG_MSG_PEEK) != 0) {
+        return {-1, Errno::INVAL};
+    }
+    const int native_flags = (flags & FLAG_MSG_PEEK) != 0 ? MSG_PEEK : 0;
     ASSERT(message.size() < static_cast<size_t>((std::numeric_limits<int>::max)()));
 
     sockaddr_in addr_in{};
@@ -993,7 +1057,7 @@ std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAdd
     sockaddr* const p_addr_in = addr ? reinterpret_cast<sockaddr*>(&addr_in) : nullptr;
 
     const auto result = recvfrom(fd, reinterpret_cast<char*>(message.data()),
-                                 static_cast<int>(message.size()), 0, p_addr_in, p_addrlen);
+                                 static_cast<int>(message.size()), native_flags, p_addr_in, p_addrlen);
     if (result != SOCKET_ERROR) {
         if (addr) {
             *addr = TranslateToSockAddrIn(addr_in, addrlen);
@@ -1030,7 +1094,7 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
     sockaddr host_addr_in;
 
     if (addr) {
-        host_addr_in = TranslateFromSockAddrIn(*addr);
+        host_addr_in = TranslateFromSockAddrIn(is_datagram ? SteerDestination(*addr) : *addr);
         to = &host_addr_in;
     }
 

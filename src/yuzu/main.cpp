@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
+#include <QMessageBox>
+#include "frontend_common/config_file.h"
 #include "startup_checks.h"
 
 #if YUZU_ROOM
@@ -200,10 +202,19 @@ int main(int argc, char* argv[]) {
     // generating shaders
     setlocale(LC_ALL, "C");
 
-    MainWindow main_window{has_broken_vulkan};
-    // After settings have been loaded by GMainWindow, apply the filter
-    main_window.show();
+    try {
+        MainWindow main_window{has_broken_vulkan};
+        // After settings have been loaded by GMainWindow, apply the filter
+        main_window.show();
 
-    app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
-    return app.exec();
+        app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window,
+                    &MainWindow::OnAppFocusStateChanged);
+        return app.exec();
+    } catch (const ConfigFileError& error) {
+        QMessageBox::critical(nullptr, QObject::tr("Settings could not be loaded"),
+                              QObject::tr("Eden stopped to protect your existing settings. "
+                                          "Your settings file has not been replaced.\n\n%1")
+                                  .arg(QString::fromUtf8(error.what())));
+        return EXIT_FAILURE;
+    }
 }

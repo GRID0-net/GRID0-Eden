@@ -404,15 +404,15 @@ private:
     }
 
     Result SetNextAlpnProto(InBuffer<BufferAttr_HipcMapAlias> data) {
-        auto const to_write = u32((std::min)(next_alpn_proto.size(), data.size()));
-        next_alpn_proto.assign(data.begin(), data.begin() + to_write);
+        R_TRY(backend->SetAlpnProtocols(data));
+        next_alpn_proto.assign(data.begin(), data.end());
         LOG_DEBUG(Service_SSL, "SetNextAlpnProto called, size={}", next_alpn_proto.size());
         R_SUCCEED();
     }
 
     Result GetNextAlpnProto(OutBuffer<BufferAttr_HipcMapAlias> data, Out<u32> to_write) {
         *to_write = u32((std::min)(next_alpn_proto.size(), data.size()));
-        next_alpn_proto.assign(data.begin(), data.begin() + *to_write);
+        std::copy_n(next_alpn_proto.begin(), *to_write, data.begin());
         LOG_DEBUG(Service_SSL, "GetNextAlpnProto called, size={}", *to_write);
         R_SUCCEED();
     }

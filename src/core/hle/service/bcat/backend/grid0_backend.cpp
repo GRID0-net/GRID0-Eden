@@ -42,33 +42,42 @@ Grid0BcatBackend::Grid0BcatBackend(DirectoryGetter getter) : BcatBackend(std::mo
 
 Grid0BcatBackend::~Grid0BcatBackend() = default;
 
-bool Grid0BcatBackend::Synchronize(Kernel::KernelCore& kernel, TitleIDVersion title, ProgressServiceBackend& progress) {
+bool Grid0BcatBackend::Prefetch(Kernel::KernelCore& kernel, TitleIDVersion title,
+                                ProgressServiceBackend& progress) {
+    return Sync(kernel, title, nullptr, progress,
+                std::chrono::steady_clock::now() + std::chrono::seconds(20));
+}
+
+bool Grid0BcatBackend::Synchronize(Kernel::KernelCore& kernel, TitleIDVersion title,
+                                   ProgressServiceBackend& progress) {
     return Sync(kernel, title, nullptr, progress);
 }
 
-bool Grid0BcatBackend::SynchronizeDirectory(Kernel::KernelCore& kernel, TitleIDVersion title, std::string name,
-                                            ProgressServiceBackend& progress) {
+bool Grid0BcatBackend::SynchronizeDirectory(Kernel::KernelCore& kernel, TitleIDVersion title,
+                                            std::string name, ProgressServiceBackend& progress) {
     return Sync(kernel, title, &name, progress);
 }
 
-bool Grid0BcatBackend::Sync(Kernel::KernelCore& kernel, TitleIDVersion title, const std::string* only_directory,
-                            ProgressServiceBackend& progress) {
+bool Grid0BcatBackend::Sync(Kernel::KernelCore& kernel, TitleIDVersion title,
+                            const std::string* only_directory, ProgressServiceBackend& progress,
+                            std::optional<std::chrono::steady_clock::time_point> deadline) {
     progress.StartConnecting(kernel);
     const auto title_hex = fmt::format("{:016x}", title.title_id);
-    const auto list = Account::Request("GET", "/emulator/v1/bcat/" + title_hex);
+    Account::RequestSession requests;
+    const auto list = requests.Request("GET", "/emulator/v1/bcat/" + title_hex);
     if (!list || list->status != 200) {
         // No login, an unreachable server, or one without the BCAT API: keep what the cache
         // holds, as a console does when the BCAT server cannot be reached.
         LOG_INFO(Service_BCAT, "GRID0+: no BCAT list for {} ({})", title_hex,
                  list ? list->status : 0);
         progress.FinishDownload(kernel, ResultSuccess);
-        return true;
+        return false;
     }
     const auto body = nlohmann::json::parse(list->body, nullptr, false);
     if (!body.is_object() || !body.contains("directories") || !body["directories"].is_array()) {
         LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT manifest for {}; keeping cache", title_hex);
         progress.FinishDownload(kernel, ResultSuccess);
-        return true;
+        return false;
     }
 
     // Validate the entire manifest before modifying the delivery cache. A malformed entry must
@@ -77,25 +86,28 @@ bool Grid0BcatBackend::Sync(Kernel::KernelCore& kernel, TitleIDVersion title, co
         if (!dir.is_object() || !dir.contains("name") || !dir["name"].is_string() ||
             !IsSafeName(dir["name"].get<std::string>()) || !dir.contains("files") ||
             !dir["files"].is_array()) {
-            LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT directory for {}; keeping cache", title_hex);
+            LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT directory for {}; keeping cache",
+                        title_hex);
             progress.FinishDownload(kernel, ResultSuccess);
-            return true;
+            return false;
         }
         for (const auto& file : dir["files"]) {
             if (!file.is_object() || !file.contains("name") || !file["name"].is_string() ||
                 !IsSafeName(file["name"].get<std::string>()) || !file.contains("sha256") ||
                 !file["sha256"].is_string()) {
-                LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT file for {}; keeping cache", title_hex);
+                LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT file for {}; keeping cache",
+                            title_hex);
                 progress.FinishDownload(kernel, ResultSuccess);
-                return true;
+                return false;
             }
             const auto hash = file["sha256"].get<std::string>();
             if (hash.size() != 64 || !std::all_of(hash.begin(), hash.end(), [](char c) {
                     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
                 })) {
-                LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT hash for {}; keeping cache", title_hex);
+                LOG_WARNING(Service_BCAT, "GRID0+: invalid BCAT hash for {}; keeping cache",
+                            title_hex);
                 progress.FinishDownload(kernel, ResultSuccess);
-                return true;
+                return false;
             }
         }
     }
@@ -125,40 +137,67 @@ bool Grid0BcatBackend::Sync(Kernel::KernelCore& kernel, TitleIDVersion title, co
     }
 
     size_t downloaded = 0;
+    size_t cached = 0;
+    size_t failed = 0;
+    u64 downloaded_bytes = 0;
     for (const auto& [dir_name, files] : wanted) {
         auto dir = root->GetSubdirectory(dir_name);
         if (dir == nullptr) {
             dir = root->CreateSubdirectory(dir_name);
         }
         if (dir == nullptr) {
+            LOG_WARNING(Service_BCAT, "GRID0+: cannot create BCAT directory {}", dir_name);
+            failed += files.size();
             continue;
         }
         for (const auto& [file_name, sha256] : files) {
+            // Do not schedule another download after the initial-sync budget. An in-flight
+            // HTTP request keeps its existing connection/read timeouts; this is a soft budget.
+            if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+                LOG_WARNING(Service_BCAT,
+                            "GRID0+: initial BCAT sync budget reached for {}; keeping cache "
+                            "(downloaded={} cached={} failed={} bytes={}, pending={}/{})",
+                            title_hex, downloaded, cached, failed, downloaded_bytes,
+                            dir_name, file_name);
+                progress.FinishDownload(kernel, ResultSuccess);
+                return false;
+            }
             if (const auto local = dir->GetFile(file_name); local != nullptr) {
                 const auto bytes = local->ReadAllBytes();
                 if (Sha256Hex(bytes.data(), bytes.size()) == sha256) {
+                    ++cached;
                     continue;
                 }
             }
-            const auto data = Account::Request(
+            const auto data = requests.Request(
                 "GET", fmt::format("/emulator/v1/bcat/{}/{}/{}", title_hex, dir_name, file_name));
             if (!data || data->status != 200 ||
                 Sha256Hex(data->body.data(), data->body.size()) != sha256) {
                 LOG_WARNING(Service_BCAT, "GRID0+: {}/{} did not download intact", dir_name,
                             file_name);
+                ++failed;
                 continue;
             }
             progress.StartDownloadingFile(kernel, dir_name, file_name, data->body.size());
             dir->DeleteFile(file_name);
             auto out = dir->CreateFile(file_name);
-            if (out == nullptr) {
+            if (out == nullptr || !out->Resize(data->body.size()) ||
+                out->Write(reinterpret_cast<const u8*>(data->body.data()), data->body.size()) !=
+                    data->body.size()) {
+                LOG_WARNING(Service_BCAT, "GRID0+: could not write BCAT file {}/{}", dir_name,
+                            file_name);
+                dir->DeleteFile(file_name);
+                ++failed;
                 continue;
             }
-            out->Resize(data->body.size());
-            out->WriteBytes(std::vector<u8>(data->body.begin(), data->body.end()));
             progress.UpdateFileProgress(kernel, data->body.size());
             progress.FinishDownloadingFile(kernel);
             ++downloaded;
+            downloaded_bytes += data->body.size();
+            if (downloaded <= 4) {
+                LOG_INFO(Service_BCAT, "GRID0+: BCAT cached {}/{} ({} bytes)", dir_name,
+                         file_name, data->body.size());
+            }
         }
         // A file the server no longer has leaves the cache, as on a console.
         for (const auto& local : dir->GetFiles()) {
@@ -176,10 +215,12 @@ bool Grid0BcatBackend::Sync(Kernel::KernelCore& kernel, TitleIDVersion title, co
         }
     }
 
-    LOG_INFO(Service_BCAT, "GRID0+: {} BCAT folder(s) for {}, {} file(s) downloaded",
-             wanted.size(), title_hex, downloaded);
+    LOG_INFO(Service_BCAT,
+             "GRID0+: {} BCAT folder(s) for {}, {} file(s) downloaded, {} cached, {} failed, "
+             "{} downloaded bytes", wanted.size(), title_hex, downloaded, cached, failed,
+             downloaded_bytes);
     progress.FinishDownload(kernel, ResultSuccess);
-    return true;
+    return failed == 0;
 }
 
 bool Grid0BcatBackend::Clear(Kernel::KernelCore& kernel, u64 title_id) {
@@ -193,11 +234,13 @@ bool Grid0BcatBackend::Clear(Kernel::KernelCore& kernel, u64 title_id) {
     return true;
 }
 
-void Grid0BcatBackend::SetPassphrase(Kernel::KernelCore& kernel, u64 title_id, const Passphrase& passphrase) {
+void Grid0BcatBackend::SetPassphrase(Kernel::KernelCore& kernel, u64 title_id,
+                                     const Passphrase& passphrase) {
     // GRID0+ hands over the files themselves; the passphrase only decrypts a container.
 }
 
-std::optional<std::vector<u8>> Grid0BcatBackend::GetLaunchParameter(Kernel::KernelCore& kernel, TitleIDVersion title) {
+std::optional<std::vector<u8>> Grid0BcatBackend::GetLaunchParameter(Kernel::KernelCore& kernel,
+                                                                    TitleIDVersion title) {
     return std::nullopt;
 }
 

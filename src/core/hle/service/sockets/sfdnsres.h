@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <mutex>
 #include "core/hle/service/service.h"
+#include "core/hle/service/sockets/npln_startup.h"
 
 namespace Core {
 class System;
@@ -14,12 +16,20 @@ class System;
 
 namespace Service::Sockets {
 
+class DeferredPollWaker;
+
 class SFDNSRES final : public ServiceFramework<SFDNSRES> {
 public:
     explicit SFDNSRES(Core::System& system_);
     ~SFDNSRES() override;
+    void SetDeferredPollWaker(std::shared_ptr<DeferredPollWaker> waker);
 
 private:
+    bool DeferNplnStartup(HLERequestContext& ctx);
+    std::shared_ptr<DeferredPollWaker> deferred_poll_waker;
+    std::mutex npln_startup_mutex;
+    NplnStartupGate npln_startup;
+    bool npln_startup_logged = false;
     void GetHostByNameRequest(HLERequestContext& ctx);
     void GetGaiStringErrorRequest(HLERequestContext& ctx);
     void GetHostByNameRequestWithOptions(HLERequestContext& ctx);

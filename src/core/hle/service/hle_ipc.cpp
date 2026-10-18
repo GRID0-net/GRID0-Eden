@@ -311,7 +311,24 @@ Result HLERequestContext::WriteToOutgoingCommandBuffer() {
     return ResultSuccess;
 }
 
+bool HLERequestContext::SnapshotReadBuffers(std::size_t max_buffer_size) {
+    for (std::size_t i = 0; i < read_buffer_snapshots.size(); ++i) {
+        if (CanReadBuffer(i) && GetReadBufferSize(i) > max_buffer_size) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < read_buffer_snapshots.size(); ++i) {
+        if (CanReadBuffer(i) && !read_buffer_snapshots[i]) {
+            read_buffer_snapshots[i] = ReadBufferCopy(i);
+        }
+    }
+    return true;
+}
+
 std::vector<u8> HLERequestContext::ReadBufferCopy(std::size_t buffer_index) const {
+    if (buffer_index < read_buffer_snapshots.size() && read_buffer_snapshots[buffer_index]) {
+        return *read_buffer_snapshots[buffer_index];
+    }
     const bool is_buffer_a{BufferDescriptorA().size() > buffer_index &&
                            BufferDescriptorA()[buffer_index].Size()};
     if (is_buffer_a) {
@@ -352,6 +369,9 @@ std::span<const u8> HLERequestContext::ReadBufferX(std::size_t buffer_index) con
 }
 
 std::span<const u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) const {
+    if (buffer_index < read_buffer_snapshots.size() && read_buffer_snapshots[buffer_index]) {
+        return *read_buffer_snapshots[buffer_index];
+    }
     Core::Memory::CpuGuestMemory<u8, Core::Memory::GuestMemoryFlags::UnsafeRead> gm(memory, 0, 0);
 
     const bool is_buffer_a{BufferDescriptorA().size() > buffer_index &&

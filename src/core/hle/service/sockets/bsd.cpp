@@ -22,11 +22,14 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/deferred_poll_waker.h"
+#include "core/hle/service/sockets/message_batch.h"
 #include "core/hle/service/sockets/private_server.h"
+#include "core/hle/service/sockets/socket_address.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
 #include "core/internal_network/sockets.h"
+#include "core/memory.h"
 #include "network/network.h"
 #include <common/settings.h>
 
@@ -121,10 +124,10 @@ void BSD_USA::AcceptWork::Response(HLERequestContext& ctx) {
 
 void BSD_USA::ConnectWork::Execute(BSD_USA* bsd) {
     bsd_errno = bsd->ConnectImpl(fd, addr);
-    if (addr.size() == sizeof(SockAddrIn)) {
-        const auto addr_in = GetValue<SockAddrIn>(addr);
+    SockAddrIn addr_in{};
+    if (ReadSockAddrIn(addr, addr_in) == Errno::SUCCESS) {
         SWITCHNET_TRACE("connect fd={} to {}:{} -> errno={}", fd,
-                        Network::IPv4AddressToString(addr_in.ip), addr_in.portno,
+                        Network::IPv4AddressToString(addr_in.ip), Translate(addr_in).portno,
                         static_cast<u32>(bsd_errno));
     } else {
         SWITCHNET_TRACE("connect fd={} with a {}-byte address -> errno={}", fd, addr.size(),
@@ -233,22 +236,7 @@ void BSD_USA::Socket(HLERequestContext& ctx) {
 }
 
 void BSD_USA::SocketExempt(HLERequestContext& ctx) {
-    IPC::RequestParser rp{ctx};
-    const u32 domain = rp.Pop<u32>();
-    const u32 type = rp.Pop<u32>();
-    const u32 protocol = rp.Pop<u32>();
-
-    LOG_DEBUG(Service, "called. domain={} type={} protocol={}", domain, type, protocol);
-
-    auto [fd, bsd_errno] = SocketImpl(Domain(domain), Type(type), Protocol(protocol));
-    if (bsd_errno == Errno::SUCCESS) {
-        bsd_errno = ShutdownImpl(fd, 0);
-    }
-
-    IPC::ResponseBuilder rb{ctx, 4};
-    rb.Push(ResultSuccess);
-    rb.Push<s32>(fd);
-    rb.PushEnum(bsd_errno);
+    Socket(ctx);
 }
 
 void BSD_USA::Select(HLERequestContext& ctx) {
@@ -267,11 +255,15 @@ void BSD_USA::Poll(HLERequestContext& ctx) {
     const s32 timeout = rp.Pop<s32>();
 
     LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
+    if (nfds < 0 || timeout < -1) {
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
 
     // A re-run of a deferred poll goes straight back to it: the guest's buffer may no longer hold
     // this poll's descriptors (see PollWithEventFd), so it cannot be looked at again to decide.
     if (deferred_poll_waker &&
-        (IsDeferredPoll(ctx) || PollIncludesEventFd(ctx.ReadBuffer(), nfds))) {
+        (nfds == 0 || IsDeferredPoll(ctx) || PollIncludesEventFd(ctx.ReadBuffer(), nfds))) {
         PollWithEventFd(ctx, nfds, timeout);
         return;
     }
@@ -500,6 +492,53 @@ void BSD_USA::SendTo(HLERequestContext& ctx) {
                      });
 }
 
+void BSD_USA::RecvMMsg(HLERequestContext& ctx) {
+    MMsg(ctx, true);
+}
+
+void BSD_USA::SendMMsg(HLERequestContext& ctx) {
+    MMsg(ctx, false);
+}
+
+void BSD_USA::MMsg(HLERequestContext& ctx, bool receive) {
+    IPC::RequestParser rp{ctx};
+    const s32 fd = rp.Pop<s32>();
+    const u32 count = rp.Pop<u32>();
+    const u32 flags = rp.Pop<u32>();
+    auto respond = [&ctx](s32 result, Errno error) {
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(result);
+        rb.PushEnum(error);
+    };
+    // Bound guest-controlled allocation before reading the in/out descriptor.
+    if (ctx.BufferDescriptorB().empty() || ctx.BufferDescriptorB()[0].Size() > 16 * 1024 * 1024) {
+        respond(-1, Errno::INVAL);
+        return;
+    }
+    const auto descriptor = ctx.BufferDescriptorB()[0];
+    std::vector<u8> buffer(descriptor.Size());
+    ctx.GetMemory().ReadBlock(descriptor.Address(), buffer.data(), buffer.size());
+    if (!IsFileDescriptorValid(fd) || !file_descriptors[fd]->socket) {
+        respond(-1, Errno::BADF);
+        return;
+    }
+    const auto [result, error] = TransferMessageBatch(
+        buffer, count, flags, receive, file_descriptors[fd]->is_connection_based,
+        [&](std::vector<u8>& data, std::vector<u8>& address, u32 call_flags) {
+            if (receive) {
+                u32 address_length = 0;
+                return RecvFromImpl(fd, call_flags, data, address, address_length);
+            }
+            return address.empty() ? SendImpl(fd, call_flags, data)
+                                   : SendToImpl(fd, call_flags, data, address);
+        });
+    ctx.GetMemory().WriteBlock(descriptor.Address(), buffer.data(), buffer.size());
+    SWITCHNET_TRACE("{}mmsg fd={} count={} -> {} errno={}", receive ? "recv" : "send", fd,
+                    count, result, static_cast<u32>(error));
+    respond(result, error);
+}
+
 void BSD_USA::Write(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const s32 fd = rp.Pop<s32>();
@@ -514,15 +553,7 @@ void BSD_USA::Write(HLERequestContext& ctx) {
             bsd_errno = Errno::INVAL;
         } else {
             std::memcpy(&add, buffer.data(), sizeof(u64));
-            std::scoped_lock lock{eventfd->mutex};
-            if (add == ~u64{0}) {
-                bsd_errno = Errno::INVAL;
-            } else if (eventfd->value > ~u64{0} - 1 - add) {
-                // Always non-blocking: a blocking write would stall a service thread.
-                bsd_errno = Errno::AGAIN;
-            } else {
-                eventfd->value += add;
-            }
+            bsd_errno = eventfd->Write(add);
         }
         if (bsd_errno == Errno::SUCCESS && deferred_poll_waker) {
             deferred_poll_waker->Wake();
@@ -552,16 +583,7 @@ void BSD_USA::Read(HLERequestContext& ctx) {
         if (ctx.GetWriteBufferSize() < sizeof(u64)) {
             bsd_errno = Errno::INVAL;
         } else {
-            std::scoped_lock lock{eventfd->mutex};
-            if (eventfd->value == 0) {
-                // Always non-blocking, for the same reason as Write.
-                bsd_errno = Errno::AGAIN;
-            } else if (eventfd->semaphore) {
-                out = 1;
-                --eventfd->value;
-            } else {
-                out = std::exchange(eventfd->value, 0);
-            }
+            std::tie(out, bsd_errno) = eventfd->Read();
         }
         if (bsd_errno == Errno::SUCCESS) {
             ctx.WriteBuffer(&out, sizeof(out));
@@ -574,12 +596,11 @@ void BSD_USA::Read(HLERequestContext& ctx) {
         return;
     }
 
-    LOG_WARNING(Service, "(STUBBED) called. fd={} len={}", fd, ctx.GetWriteBufferSize());
-
-    IPC::ResponseBuilder rb{ctx, 4};
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // ret
-    rb.Push<u32>(0); // bsd errno
+    ExecuteWork(ctx, RecvWork{
+                         .fd = fd,
+                         .flags = 0,
+                         .message = std::vector<u8>(ctx.GetWriteBufferSize()),
+                     });
 }
 
 void BSD_USA::Close(HLERequestContext& ctx) {
@@ -635,10 +656,35 @@ void BSD_USA::DuplicateSocket(HLERequestContext& ctx) {
     }
 }
 
+void BSD_USA::RegisterClientShared(HLERequestContext& ctx) {
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(0);
+    rb.PushEnum(Errno::SUCCESS);
+}
+
+void BSD_USA::UnsupportedOperation(HLERequestContext& ctx) {
+    const auto command = ctx.GetCommand();
+    const auto error = command == 4 ? Errno::ACCES :
+                       command == 19 || command == 35 ? Errno::NOTTY : Errno::OPNOTSUPP;
+    IPC::ResponseBuilder rb{ctx, command == 201 ? 6U : 4U};
+    rb.Push(ResultSuccess);
+    if (command == 201) {
+        rb.Push<u64>(0);
+    }
+    rb.Push<s32>(-1);
+    rb.PushEnum(error);
+}
+
 void BSD_USA::EventFd(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
-    const u64 initval = rp.Pop<u64>();
-    const u32 flags = rp.Pop<u32>();
+    const auto input = rp.PopRaw<EventFdParameters>();
+    const u64 initval = input.initval;
+    const u32 flags = input.flags;
+    if ((flags & ~7U) != 0 || initval == ~u64{0}) {
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
 
     LOG_DEBUG(Service, "called. initval={}, flags={}", initval, flags);
 
@@ -647,11 +693,10 @@ void BSD_USA::EventFd(HLERequestContext& ctx) {
         std::lock_guard lock(fd_table_mutex);
         fd = FindFreeFileDescriptorHandle();
         if (fd >= 0) {
-            auto state = std::make_shared<EventFdState>();
-            state->value = initval;
-            state->semaphore = (flags & 1) != 0; // EFD_SEMAPHORE
+            auto state = std::make_shared<EventFdState>(initval, (flags & 1) != 0);
             file_descriptors[fd] = FileDescriptor{};
             file_descriptors[fd]->eventfd = std::move(state);
+            file_descriptors[fd]->flags = (flags & 4) ? Network::FLAG_O_NONBLOCK : 0;
         }
     }
 
@@ -681,6 +726,16 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
         return {-1, Errno::AFNOSUPPORT};
     }
 
+    constexpr u32 TypeMask = 0x0FFFFFFF;
+    constexpr u32 CloseOnExec = 0x10000000;
+    constexpr u32 NonBlock = 0x20000000;
+    const u32 raw_type = static_cast<u32>(type);
+    if ((raw_type & ~(TypeMask | CloseOnExec | NonBlock)) != 0) {
+        return {-1, Errno::INVAL};
+    }
+    const bool non_blocking = (raw_type & NonBlock) != 0;
+    type = static_cast<Type>(raw_type & TypeMask);
+
     // user bsd:u has restrictions on SOCK_SEQPACKET and SOCK_RAW
     if (is_user && (type == Type::SEQPACKET || type == Type::RAW)) {
         if (type == Type::RAW && domain == Domain::INET && protocol == Protocol::ICMP) {
@@ -689,10 +744,6 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
             return {-1, Errno::INVAL};
         }
     }
-
-    [[maybe_unused]] const bool unk_flag = (static_cast<u32>(type) & 0x20000000) != 0;
-    UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
-    type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
 
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
@@ -713,7 +764,21 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
         descriptor.socket = std::make_shared<Network::Socket>();
     }
 
-    descriptor.socket->Initialize(Translate(domain), Translate(type), Translate(protocol));
+    const auto initialized = descriptor.socket->Initialize(Translate(domain), Translate(type),
+                                                            Translate(protocol));
+    if (initialized != Network::Errno::SUCCESS) {
+        file_descriptors[fd].reset();
+        return {-1, Translate(initialized)};
+    }
+    if (non_blocking) {
+        const auto error = descriptor.socket->SetNonBlock(true);
+        if (error != Network::Errno::SUCCESS) {
+            descriptor.socket->Close();
+            file_descriptors[fd].reset();
+            return {-1, Translate(error)};
+        }
+        descriptor.flags = Network::FLAG_O_NONBLOCK;
+    }
     descriptor.is_connection_based = IsConnectionBased(type);
     descriptor.domain = Translate(domain);
     descriptor.type = Translate(type);
@@ -721,6 +786,8 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
 
     if (Settings::values.airplane_mode.GetValue() && descriptor.is_connection_based) {
         LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
+        descriptor.socket->Close();
+        file_descriptors[fd].reset();
         return {-1, Errno::NOTCONN};
     }
 
@@ -729,9 +796,11 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
 
 std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                     s32 nfds, s32 timeout) {
-    if (nfds <= 0) {
-        // When no entries are provided, -1 is returned with errno zero
-        return {-1, Errno::SUCCESS};
+    if (nfds < 0 || timeout < -1) {
+        return {-1, Errno::INVAL};
+    }
+    if (nfds == 0) {
+        return {0, Errno::SUCCESS};
     }
     if (read_buffer.size() < nfds * sizeof(PollFD)) {
         return {-1, Errno::INVAL};
@@ -820,6 +889,7 @@ std::pair<s32, Errno> BSD_USA::AcceptImpl(s32 fd, std::vector<u8>& write_buffer)
     new_descriptor.protocol = descriptor.protocol;
 
     const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
+    write_buffer.resize(std::min(write_buffer.size(), sizeof(guest_addr_in)));
     PutValue(write_buffer, guest_addr_in);
 
     return {new_fd, Errno::SUCCESS};
@@ -829,21 +899,18 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     if (!IsFileDescriptorValid(fd)) {
         return Errno::BADF;
     }
-    ASSERT(addr.size() >= 16);
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
         return Errno::BADF;
     }
 
-    if (addr.size() != sizeof(SockAddrIn)) {
-        // Anything but a sockaddr_in cannot be read as one; guessing at it binds somewhere the
-        // guest never asked for.
-        LOG_WARNING(Service, "Bind fd={} refused: {}-byte address, only sockaddr_in is emulated",
-                    fd, addr.size());
-        return addr.size() >= 2 && addr[1] == static_cast<u8>(Domain::INET6) ? Errno::AFNOSUPPORT
-                                                                              : Errno::INVAL;
+    SockAddrIn addr_in{};
+    const auto decoded = ReadSockAddrIn(addr, addr_in);
+    if (decoded != Errno::SUCCESS) {
+        LOG_WARNING(Service, "Bind fd={} refused: {}-byte address, errno={}", fd, addr.size(),
+                    static_cast<u32>(decoded));
+        return decoded;
     }
-    auto addr_in = GetValue<SockAddrIn>(addr);
 
     return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
 }
@@ -853,21 +920,18 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
         return Errno::BADF;
     }
 
-    ASSERT(addr.size() >= 16);
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
         return Errno::BADF;
     }
 
-    if (addr.size() != sizeof(SockAddrIn)) {
-        // Read as a sockaddr_in, a sockaddr_in6's flow info became the address: a connect to
-        // 0.0.0.0 that looks like the server refusing the game.
-        LOG_WARNING(Service, "Connect fd={} refused: {}-byte address, only sockaddr_in is emulated",
-                    fd, addr.size());
-        return addr.size() >= 2 && addr[1] == static_cast<u8>(Domain::INET6) ? Errno::AFNOSUPPORT
-                                                                              : Errno::INVAL;
+    SockAddrIn addr_in{};
+    const auto decoded = ReadSockAddrIn(addr, addr_in);
+    if (decoded != Errno::SUCCESS) {
+        LOG_WARNING(Service, "Connect fd={} refused: {}-byte address, errno={}", fd, addr.size(),
+                    static_cast<u32>(decoded));
+        return decoded;
     }
-    auto addr_in = GetValue<SockAddrIn>(addr);
 
     const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
 
@@ -1239,7 +1303,24 @@ std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> m
         LOG_WARNING(Service, "Uninitialized socket");
         return {-1, Errno::BADF};
     }
-    return Translate(file_descriptors[fd]->socket->Send(message, flags));
+    const auto socket = file_descriptors[fd]->socket;
+    const bool temporary_nonblock = (flags & Network::FLAG_MSG_DONTWAIT) != 0 &&
+                                   (file_descriptors[fd]->flags & Network::FLAG_O_NONBLOCK) == 0;
+    flags &= ~Network::FLAG_MSG_DONTWAIT;
+    if (flags != 0) {
+        return {-1, Errno::INVAL};
+    }
+    if (temporary_nonblock) {
+        const auto error = socket->SetNonBlock(true);
+        if (error != Network::Errno::SUCCESS) {
+            return {-1, Translate(error)};
+        }
+    }
+    const auto result = Translate(file_descriptors[fd]->socket->Send(message, flags));
+    if (temporary_nonblock) {
+        socket->SetNonBlock(false);
+    }
+    return result;
 }
 
 std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
@@ -1255,13 +1336,33 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
     Network::SockAddrIn addr_in;
     Network::SockAddrIn* p_addr_in = nullptr;
     if (!addr.empty()) {
-        ASSERT(addr.size() >= 16);
-        auto guest_addr_in = GetValue<SockAddrIn>(addr);
+        SockAddrIn guest_addr_in{};
+        const auto decoded = ReadSockAddrIn(addr, guest_addr_in);
+        if (decoded != Errno::SUCCESS) {
+            return {-1, decoded};
+        }
         addr_in = Translate(guest_addr_in);
         p_addr_in = &addr_in;
     }
 
-    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+    const auto socket = file_descriptors[fd]->socket;
+    const bool temporary_nonblock = (flags & Network::FLAG_MSG_DONTWAIT) != 0 &&
+                                   (file_descriptors[fd]->flags & Network::FLAG_O_NONBLOCK) == 0;
+    flags &= ~Network::FLAG_MSG_DONTWAIT;
+    if (flags != 0) {
+        return {-1, Errno::INVAL};
+    }
+    if (temporary_nonblock) {
+        const auto error = socket->SetNonBlock(true);
+        if (error != Network::Errno::SUCCESS) {
+            return {-1, Translate(error)};
+        }
+    }
+    const auto result = Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+    if (temporary_nonblock) {
+        socket->SetNonBlock(false);
+    }
+    return result;
 }
 
 Errno BSD_USA::CloseImpl(s32 fd) {
@@ -1340,7 +1441,7 @@ void BSD_USA::SetDeferredPollWaker(std::shared_ptr<DeferredPollWaker> waker) {
     deferred_poll_waker = std::move(waker);
 }
 
-std::shared_ptr<BSD_USA::EventFdState> BSD_USA::GetEventFd(s32 fd) {
+std::shared_ptr<EventFdState> BSD_USA::GetEventFd(s32 fd) {
     if (fd < 0 || fd >= static_cast<s32>(MAX_FD)) {
         return nullptr;
     }
@@ -1372,6 +1473,9 @@ bool BSD_USA::PollIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) {
 // revents set. gRPC depends on both.
 std::pair<s32, Errno> BSD_USA::PollOnce(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                     s32 nfds) {
+    if (nfds == 0) {
+        return {0, Errno::SUCCESS};
+    }
     std::vector<PollFD> fds(nfds);
     std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
 
@@ -1397,19 +1501,8 @@ std::pair<s32, Errno> BSD_USA::PollOnce(std::vector<u8>& write_buffer, std::span
             // request is read as a request for input.
             const bool wants_input =
                 pollfd.events == PollEvents{} || True(pollfd.events & PollEvents::In);
-            std::scoped_lock lock{descriptor.eventfd->mutex};
-            if (wants_input && descriptor.eventfd->value > 0) {
+            if (wants_input && descriptor.eventfd->Readable()) {
                 pollfd.revents |= PollEvents::In;
-                // Consumed as it is reported. gRPC writes its wakeup eventfd but never reads it
-                // back, so left set it would stay readable for good: every poll would return at
-                // once on the wakeup and the event loop would never get to the socket it is
-                // waiting on. NextendoNetwork found exactly that on the same game (facts only).
-                // A guest that does read it gets EAGAIN, which gRPC's wakeup consumer accepts.
-                if (descriptor.eventfd->semaphore) {
-                    --descriptor.eventfd->value;
-                } else {
-                    descriptor.eventfd->value = 0;
-                }
             }
             if (True(pollfd.events & PollEvents::Out)) {
                 pollfd.revents |= PollEvents::Out;
@@ -1472,7 +1565,7 @@ void BSD_USA::PollWithEventFd(HLERequestContext& ctx, s32 nfds, s32 timeout) {
             pollfds = it->second.pollfds;
         }
     }
-    if (pollfds.empty()) {
+    if (pollfds.empty() && pollfds_size > 0) {
         const auto read_buffer = ctx.ReadBuffer();
         pollfds.assign(read_buffer.begin(), read_buffer.end());
     }
@@ -1524,7 +1617,8 @@ void BSD_USA::PollWithEventFd(HLERequestContext& ctx, s32 nfds, s32 timeout) {
     if (ret >= 0 && !write_buffer.empty()) {
         ctx.WriteBuffer(write_buffer);
     }
-    SWITCHNET_TRACE("poll(eventfd) nfds={} timeout={} -> {} errno={} [{}]", nfds, timeout, ret,
+    SWITCHNET_TRACE("poll({}) nfds={} timeout={} -> {} errno={} [{}]",
+                    nfds == 0 ? "timer" : "eventfd", nfds, timeout, ret,
                     static_cast<u32>(bsd_errno),
                     DescribePollFds(ret >= 0 ? std::span<const u8>{write_buffer}
                                              : std::span<const u8>{pollfds},
@@ -1555,241 +1649,6 @@ void BSD_USA::OnProxyPacketReceived(const Network::ProxyPacket& packet) {
     }
 }
 
-
-// RecvMMsg(u32 fd, u32 vlen, u32 flags, u32 reserved, TimeVal timeout) -> (i32 ret, u32 bsd_errno),
-// with the in/out buffer serialised as in SendMMsg. Each iov's data is space to receive into:
-// received bytes are written there in place, each message's length is set, and the buffer is
-// written back.
-//
-// gRPC's recvmsg reaches the service as a RecvMMsg of one message. Left as an EOPNOTSUPP stub,
-// Splatoon 3's online client closed its connection to the game server the first time the
-// socket became readable, before reading the TLS handshake reply.
-void BSD_USA::RecvMMsg(HLERequestContext& ctx) {
-    IPC::RequestParser rp{ctx};
-    const s32 fd = rp.Pop<s32>();
-    const u32 vlen = rp.Pop<u32>();
-    const u32 flags = rp.Pop<u32>();
-
-    auto respond = [&ctx](s32 ret, Errno err) {
-        IPC::ResponseBuilder rb{ctx, 4};
-        rb.Push(ResultSuccess);
-        rb.Push<s32>(ret);
-        rb.PushEnum(err);
-    };
-
-    if (ctx.BufferDescriptorB().empty()) {
-        respond(-1, Errno::INVAL);
-        return;
-    }
-    const auto& desc = ctx.BufferDescriptorB()[0];
-    std::vector<u8> buf(desc.Size());
-    ctx.GetMemory().ReadBlock(desc.Address(), buf.data(), buf.size());
-
-    struct Space {
-        std::size_t offset;
-        std::size_t size;
-    };
-    struct Message {
-        std::vector<Space> iovs;
-        std::size_t length_offset;
-    };
-    std::vector<Message> messages;
-
-    std::size_t pos = 1; // header byte, ignored as Horizon does
-    auto skip = [&](std::size_t n) {
-        if (pos + n > buf.size()) {
-            return false;
-        }
-        pos += n;
-        return true;
-    };
-    auto read_u32 = [&](u32& v) {
-        if (pos + sizeof(v) > buf.size()) {
-            return false;
-        }
-        std::memcpy(&v, buf.data() + pos, sizeof(v));
-        pos += sizeof(v);
-        return true;
-    };
-
-    bool parsed = true;
-    for (u32 i = 0; i < vlen && parsed; ++i) {
-        Message message;
-        u32 name_len = 0, iov_count = 0, control_len = 0, msg_flags = 0;
-        parsed = read_u32(name_len) && skip(name_len) && read_u32(iov_count);
-        for (u32 j = 0; j < iov_count && parsed; ++j) {
-            u64 len = 0;
-            parsed = pos + sizeof(len) <= buf.size();
-            if (parsed) {
-                std::memcpy(&len, buf.data() + pos, sizeof(len));
-                pos += sizeof(len);
-                message.iovs.push_back({pos, static_cast<std::size_t>(len)});
-                parsed = skip(static_cast<std::size_t>(len));
-            }
-        }
-        parsed = parsed && read_u32(control_len) && skip(control_len) && read_u32(msg_flags);
-        message.length_offset = pos;
-        parsed = parsed && skip(sizeof(u32));
-        if (parsed) {
-            messages.push_back(std::move(message));
-        }
-    }
-    if (!parsed) {
-        respond(-1, Errno::INVAL);
-        return;
-    }
-
-    std::size_t capacity = 0;
-    for (const auto& message : messages) {
-        for (const auto& iov : message.iovs) {
-            capacity += iov.size;
-        }
-    }
-    std::vector<u8> received(capacity);
-    const auto [ret, err] = RecvImpl(fd, flags, received);
-    SWITCHNET_TRACE("recvmmsg fd={} vlen={} capacity={} -> {} errno={}", fd, vlen, capacity, ret,
-                    static_cast<u32>(err));
-    if (err != Errno::SUCCESS || ret < 0) {
-        respond(-1, err);
-        return;
-    }
-
-    // A stream socket's bytes fill the messages' buffers in order.
-    std::size_t left = static_cast<std::size_t>(ret);
-    std::size_t from = 0;
-    s32 filled_messages = 0;
-    for (const auto& message : messages) {
-        u32 length = 0;
-        for (const auto& iov : message.iovs) {
-            const std::size_t n = std::min(left, iov.size);
-            std::memcpy(buf.data() + iov.offset, received.data() + from, n);
-            from += n;
-            left -= n;
-            length += static_cast<u32>(n);
-        }
-        std::memcpy(buf.data() + message.length_offset, &length, sizeof(length));
-        if (length == 0 && filled_messages > 0) {
-            break;
-        }
-        ++filled_messages;
-        if (left == 0) {
-            break;
-        }
-    }
-
-    ctx.GetMemory().WriteBlock(desc.Address(), buf.data(), buf.size());
-    respond(filled_messages, Errno::SUCCESS);
-}
-
-// SendMMsg(u32 fd, u32 vlen, u32 flags) -> (i32 ret, u32 bsd_errno), with an in/out buffer
-// holding the messages serialised as Horizon does: one ignored header byte, then per message
-// u32 name_len + name, u32 iov_count + (u64 len + data) per iov, u32 control_len + control,
-// u32 flags, u32 length. The length of each message sent is written back in place.
-//
-// gRPC's sendmsg reaches the service as a SendMMsg of one message. Left as an EOPNOTSUPP stub,
-// Splatoon 3's online client retried it without end once connected (a million calls in 40 s),
-// so the TLS handshake to the game server was never sent.
-void BSD_USA::SendMMsg(HLERequestContext& ctx) {
-    IPC::RequestParser rp{ctx};
-    const s32 fd = rp.Pop<s32>();
-    const u32 vlen = rp.Pop<u32>();
-    const u32 flags = rp.Pop<u32>();
-
-    auto respond = [&ctx](s32 ret, Errno err) {
-        IPC::ResponseBuilder rb{ctx, 4};
-        rb.Push(ResultSuccess);
-        rb.Push<s32>(ret);
-        rb.PushEnum(err);
-    };
-
-    if (ctx.BufferDescriptorB().empty()) {
-        respond(-1, Errno::INVAL);
-        return;
-    }
-    const auto& desc = ctx.BufferDescriptorB()[0];
-    std::vector<u8> buf(desc.Size());
-    ctx.GetMemory().ReadBlock(desc.Address(), buf.data(), buf.size());
-
-    std::size_t pos = 1; // header byte, ignored as Horizon does
-    auto take = [&](std::size_t n) -> std::optional<std::span<const u8>> {
-        if (pos + n > buf.size()) {
-            return std::nullopt;
-        }
-        std::span<const u8> out{buf.data() + pos, n};
-        pos += n;
-        return out;
-    };
-    auto take_u32 = [&]() -> std::optional<u32> {
-        const auto b = take(sizeof(u32));
-        if (!b) {
-            return std::nullopt;
-        }
-        u32 v;
-        std::memcpy(&v, b->data(), sizeof(v));
-        return v;
-    };
-
-    s32 sent_messages = 0;
-    Errno first_error = Errno::SUCCESS;
-    for (u32 i = 0; i < vlen; ++i) {
-        const auto name_len = take_u32();
-        const auto name = name_len ? take(*name_len) : std::nullopt;
-        const auto iov_count = take_u32();
-        if (!name_len || !name || !iov_count) {
-            first_error = Errno::INVAL;
-            break;
-        }
-        std::vector<u8> data;
-        bool ok = true;
-        for (u32 j = 0; j < *iov_count && ok; ++j) {
-            const auto len_bytes = take(sizeof(u64));
-            if (!len_bytes) {
-                ok = false;
-                break;
-            }
-            u64 len;
-            std::memcpy(&len, len_bytes->data(), sizeof(len));
-            const auto piece = take(static_cast<std::size_t>(len));
-            ok = piece.has_value();
-            if (ok) {
-                data.insert(data.end(), piece->begin(), piece->end());
-            }
-        }
-        const auto control_len = ok ? take_u32() : std::nullopt;
-        if (!control_len || !take(*control_len) || !take_u32() /* flags */) {
-            first_error = Errno::INVAL;
-            break;
-        }
-        const std::size_t length_pos = pos;
-        if (!take(sizeof(u32))) {
-            first_error = Errno::INVAL;
-            break;
-        }
-
-        const auto [ret, err] = name->empty() ? SendImpl(fd, flags, data)
-                                              : SendToImpl(fd, flags, data, *name);
-        if (err != Errno::SUCCESS || ret < 0) {
-            first_error = err;
-            break;
-        }
-        const u32 length = static_cast<u32>(ret);
-        std::memcpy(buf.data() + length_pos, &length, sizeof(length));
-        ++sent_messages;
-        if (static_cast<std::size_t>(ret) < data.size()) {
-            break; // a short send ends the batch, as sendmmsg does
-        }
-    }
-
-    ctx.GetMemory().WriteBlock(desc.Address(), buf.data(), buf.size());
-    SWITCHNET_TRACE("sendmmsg fd={} vlen={} -> {} errno={}", fd, vlen, sent_messages,
-                    static_cast<u32>(first_error));
-    if (sent_messages == 0 && first_error != Errno::SUCCESS) {
-        respond(-1, first_error);
-        return;
-    }
-    respond(sent_messages, Errno::SUCCESS);
-}
-
 BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
     : ServiceFramework{system_, name}
     , is_user{is_user_} {
@@ -1799,7 +1658,7 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {1, &BSD_USA::StartMonitoring, "StartMonitoring"},
         {2, &BSD_USA::Socket, "Socket"},
         {3, &BSD_USA::SocketExempt, "SocketExempt"},
-        {4, nullptr, "Open"},
+        {4, &BSD_USA::UnsupportedOperation, "Open"},
         {5, &BSD_USA::Select, "Select"},
         {6, &BSD_USA::Poll, "Poll"},
         {7, nullptr, "Sysctl"},
@@ -1814,23 +1673,23 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {16, &BSD_USA::GetSockName, "GetSockName"},
         {17, &BSD_USA::GetSockOpt, "GetSockOpt"},
         {18, &BSD_USA::Listen, "Listen"},
-        {19, nullptr, "Ioctl"},
+        {19, &BSD_USA::UnsupportedOperation, "Ioctl"},
         {20, &BSD_USA::Fcntl, "Fcntl"},
         {21, &BSD_USA::SetSockOpt, "SetSockOpt"},
         {22, &BSD_USA::Shutdown, "Shutdown"},
-        {23, nullptr, "ShutdownAllSockets"},
+        {23, &BSD_USA::UnsupportedOperation, "ShutdownAllSockets"},
         {24, &BSD_USA::Write, "Write"},
         {25, &BSD_USA::Read, "Read"},
         {26, &BSD_USA::Close, "Close"},
         {27, &BSD_USA::DuplicateSocket, "DuplicateSocket"},
-        {28, nullptr, "GetResourceStatistics"},
+        {28, &BSD_USA::UnsupportedOperation, "GetResourceStatistics"},
         {29, &BSD_USA::RecvMMsg, "RecvMMsg"}, //3.0.0+
         {30, &BSD_USA::SendMMsg, "SendMMsg"}, //3.0.0+
         {31, &BSD_USA::EventFd, "EventFd"}, //7.0.0+
-        {32, nullptr, "RegisterResourceStatisticsName"}, //7.0.0+
-        {33, nullptr, "RegisterClientShared"}, //10.0.0+
-        {34, nullptr, "GetSocketStatistics"}, //15.0.0+
-        {35, nullptr, "NifIoctl"}, //17.0.0+
+        {32, &BSD_USA::UnsupportedOperation, "RegisterResourceStatisticsName"}, //7.0.0+
+        {33, &BSD_USA::RegisterClientShared, "RegisterClientShared"}, //10.0.0+
+        {34, &BSD_USA::UnsupportedOperation, "GetSocketStatistics"}, //15.0.0+
+        {35, &BSD_USA::UnsupportedOperation, "NifIoctl"}, //17.0.0+
         {36, nullptr, "Unknown36"}, //18.0.0+
         {37, nullptr, "Unknown37"}, //18.0.0+
         {38, nullptr, "Unknown38"}, //18.0.0+
@@ -1839,8 +1698,8 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {41, nullptr, "Unknown41"}, //21.0.0+
         {42, nullptr, "Unknown42"}, //21.0.0+
         {43, nullptr, "Unknown43"}, //21.0.0+
-        {200, nullptr, "SetThreadCoreMask"}, //15.0.0+
-        {201, nullptr, "GetThreadCoreMask"}, //15.0.0+
+        {200, &BSD_USA::UnsupportedOperation, "SetThreadCoreMask"}, //15.0.0+
+        {201, &BSD_USA::UnsupportedOperation, "GetThreadCoreMask"}, //15.0.0+
     };
     // clang-format on
 

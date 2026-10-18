@@ -33,6 +33,10 @@ add_executable(tests_grid0
     common/subpage_memory.cpp
     video_core/hdr_uploads.cpp
     core/private_server.cpp
+    core/socket_address.cpp
+    core/npln_startup.cpp
+    core/message_batch.cpp
+    core/eventfd.cpp
     ../core/hle/service/sockets/private_server.cpp
 )
 target_link_libraries(tests_grid0 PRIVATE common Catch2::Catch2WithMain Threads::Threads)
@@ -45,4 +49,25 @@ if (NOT MSVC)
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-variable>
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-parameter>
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-field-initializers>)
+endif()
+
+add_executable(tests_config_file
+    common/config_file.cpp
+    ../frontend_common/config_file.cpp
+)
+target_include_directories(tests_config_file PRIVATE ..)
+target_link_libraries(tests_config_file PRIVATE Catch2::Catch2WithMain SimpleIni::SimpleIni)
+add_test(NAME config_file_preservation COMMAND tests_config_file)
+
+if (ENABLE_WEB_SERVICE)
+    add_executable(tests_grid0_https
+        core/private_server_https.cpp
+        core/deferred_poll_waker.cpp
+        core/message_batch_network.cpp
+    )
+    target_include_directories(tests_grid0_https PRIVATE ..)
+    target_link_libraries(tests_grid0_https PRIVATE
+        core Catch2::Catch2WithMain httplib::httplib OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+    add_test(NAME grid0_https_trust COMMAND tests_grid0_https)
+    set_tests_properties(grid0_https_trust PROPERTIES TIMEOUT 20)
 endif()

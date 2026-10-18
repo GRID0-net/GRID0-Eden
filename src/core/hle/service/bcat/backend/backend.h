@@ -31,6 +31,7 @@ namespace Service::BCAT {
 // Some of this class is implemented in module.cpp to avoid exposing the implementation structure.
 class ProgressServiceBackend {
     friend class IBcatService;
+    friend class IServiceCreator;
 
 public:
     ~ProgressServiceBackend();
@@ -76,6 +77,11 @@ class BcatBackend {
 public:
     explicit BcatBackend(DirectoryGetter getter);
     virtual ~BcatBackend();
+    virtual bool Prefetch(Kernel::KernelCore& kernel, TitleIDVersion title,
+                          ProgressServiceBackend& progress) {
+        return Synchronize(kernel, title, progress);
+    }
+
     // Called when the backend is needed to synchronize the data for the game with title ID and
     // version in title. A ProgressServiceBackend object is provided to alert the application of
     // status.

@@ -379,7 +379,6 @@ PollEvents Translate(Network::PollEvents flags) {
 }
 
 Network::SockAddrIn Translate(SockAddrIn value) {
-    // All lengths are valid, from [0 upto 256]
     return {
         .family = Translate(Domain(value.family)),
         .ip = value.ip,

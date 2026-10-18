@@ -162,7 +162,18 @@ public:
         socket = std::move(socket_in);
     }
 
-    Result SetHostName(const char* hostname) override {
+    Result SetHostName(const char* hostname_in) override {
+        std::string effective = hostname_in;
+        const auto [peer, error] = socket ? socket->GetPeerName() :
+            std::pair{Network::SockAddrIn{}, Network::Errno::NOTCONN};
+        if (error == Network::Errno::SUCCESS &&
+            (effective.empty() || effective == Network::IPv4AddressToString(peer.ip))) {
+            if (auto host = Service::Sockets::RedirectedHostForIp(
+                    Network::IPv4AddressToString(peer.ip)); !host.empty()) {
+                effective = std::move(host);
+            }
+        }
+        const char* hostname = effective.c_str();
         if (!skip_cert_verification) {
             if (!SSL_set1_host(ssl, hostname)) {
                 LOG_ERROR(Service_SSL, "SSL_set1_host({}) failed", hostname);
@@ -188,6 +199,16 @@ public:
         R_SUCCEED();
     }
 
+    Result SetAlpnProtocols(std::span<const u8> protocols) override {
+        if (SSL_set_alpn_protos(ssl, protocols.data(),
+                                static_cast<unsigned int>(protocols.size())) != 0) {
+            LOG_ERROR(Service_SSL, "Invalid ALPN protocol list");
+            return ResultInternalError;
+        }
+        requested_alpn.assign(protocols.begin(), protocols.end());
+        R_SUCCEED();
+    }
+
     void SetVerifyOption(u32 option) override {
         skip_cert_verification = (option == 0);
         LOG_WARNING(Service_SSL, "option={} skip_verification={}", option,
@@ -202,6 +223,20 @@ public:
     }
 
     Result DoHandshake() override {
+        if (!handshake_prepared && socket) {
+            const auto [peer, error] = socket->GetPeerName();
+            if (error == Network::Errno::SUCCESS) {
+                const auto redirected = Service::Sockets::RedirectedHostForIp(
+                    Network::IPv4AddressToString(peer.ip));
+                if (!redirected.empty()) {
+                    if (!SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)) {
+                        R_TRY(SetHostName(redirected.c_str()));
+                    }
+                    PrepareRedirectedHandshake(redirected);
+                }
+            }
+            handshake_prepared = true;
+        }
         SSL_set_verify_result(ssl, X509_V_OK);
         const int ret = SSL_do_handshake(ssl);
 
@@ -231,10 +266,8 @@ public:
     }
 
     Result Peek(size_t* out_size, std::span<u8> data) override {
-        auto const n = (std::min)(data.size(), *out_size);
-        const int ret = SSL_peek(ssl, data.data(), int(n));
-        *out_size = n;
-        return HandleReturn("SSL_write_ex", out_size, ret);
+        const int ret = SSL_peek_ex(ssl, data.data(), data.size(), out_size);
+        return HandleReturn("SSL_peek_ex", out_size, ret);
     }
 
     Result Write(size_t* out_size, std::span<const u8> data) override {
@@ -386,6 +419,45 @@ public:
         }
     }
 
+    // GRID0+ connection: make sure the SNI names the Nintendo host, and offer
+    // HTTP/1.1 only - NEX runs over a WebSocket upgrade that HTTP/2 would break. NPLN titles
+    // (gRPC) need the HTTP/2 they asked for. After citron-nextendo (Copyright 2026 citron
+    // Emulator Project).
+    void PrepareRedirectedHandshake(const std::string& redirected_host) {
+        const char* sni = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+        if (sni == nullptr) {
+            SSL_set_tlsext_host_name(ssl, redirected_host.c_str());
+            sni = redirected_host.c_str();
+        }
+        const std::string host = Common::ToLower(std::string{sni});
+        const bool npln = host.find("npln") != std::string::npos ||
+                          host.find("gs.nintendo.net") != std::string::npos;
+
+        std::vector<u8> wire;
+        if (npln) {
+            for (size_t pos = 0; pos < requested_alpn.size();) {
+                const u8 len = requested_alpn[pos];
+                if (len == 0 || pos + 1 + len > requested_alpn.size()) {
+                    break;
+                }
+                const std::string_view proto{
+                    reinterpret_cast<const char*>(requested_alpn.data() + pos + 1), len};
+                if (proto == "h2" || proto == "http/1.1") {
+                    wire.insert(wire.end(), requested_alpn.begin() + pos,
+                                requested_alpn.begin() + pos + 1 + len);
+                }
+                pos += 1 + len;
+            }
+        }
+        if (wire.empty()) {
+            static constexpr std::string_view http11{"\x08http/1.1"};
+            wire.assign(http11.begin(), http11.end());
+        }
+        SSL_set_alpn_protos(ssl, wire.data(), static_cast<unsigned int>(wire.size()));
+    }
+
+    std::vector<u8> requested_alpn;
+    bool handshake_prepared = false;
     SSL* ssl = nullptr;
     BIO* bio = nullptr;
     bool got_read_eof = false;

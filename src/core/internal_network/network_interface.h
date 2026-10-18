@@ -31,6 +31,7 @@ struct NetworkInterface {
 std::vector<NetworkInterface> GetAvailableNetworkInterfaces();
 std::optional<NetworkInterface> GetSelectedNetworkInterface();
 void SelectFirstNetworkInterface();
+std::optional<NetworkInterface> GetExplicitNetworkInterface();
 
 struct HostAdapter {
     in_addr ip_address;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include "common/settings.h"
+#include "frontend_common/config_file.h"
 
 // May be defined on command line by system provided packages (FreeBSD devel/simpleini)
 // but if building from source, it will not be defined, so just do it conditionally.
@@ -220,6 +221,7 @@ protected:
     const ConfigType type;
     std::unique_ptr<CSimpleIniA> config;
     std::string config_loc;
+    mutable ConfigFile config_file;
     const bool global;
 
 private:

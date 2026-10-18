@@ -17,7 +17,9 @@ add_library(core STATIC
     hle/service/sockets/deferred_poll_waker.h
     hle/service/sockets/private_server.cpp
     hle/service/sockets/private_server.h
+    hle/service/sockets/npln_startup.h
     hle/service/ssl/switchnet_ca.h
+    hle/service/ssl/switchnet_https.h
 
     arm/arm_interface.cpp
     arm/arm_interface.h
@@ -1073,12 +1075,15 @@ add_library(core STATIC
     hle/service/sm/sm_controller.h
     hle/service/sockets/bsd.cpp
     hle/service/sockets/bsd.h
+    hle/service/sockets/eventfd.h
+    hle/service/sockets/message_batch.h
     hle/service/sockets/nsd.cpp
     hle/service/sockets/nsd.h
     hle/service/sockets/sfdnsres.cpp
     hle/service/sockets/sfdnsres.h
     hle/service/sockets/sockets.cpp
     hle/service/sockets/sockets.h
+    hle/service/sockets/socket_address.h
     hle/service/sockets/sockets_translate.cpp
     hle/service/sockets/sockets_translate.h
     hle/service/spl/spl.cpp

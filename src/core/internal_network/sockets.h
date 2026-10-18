@@ -180,6 +180,7 @@ public:
 
 private:
     bool is_non_blocking = false;
+    bool is_datagram = false;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);

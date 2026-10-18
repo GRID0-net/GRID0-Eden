@@ -10,8 +10,7 @@
 
 #ifdef ENABLE_WEB_SERVICE
 #include <httplib.h>
-#include <openssl/pem.h>
-#include <openssl/x509.h>
+#include "core/hle/service/ssl/switchnet_https.h"
 #endif
 
 #include "common/common_types.h"
@@ -116,34 +115,6 @@ std::chrono::system_clock::time_point ReadExpiry(const std::string& jwt) {
 
 #ifdef ENABLE_WEB_SERVICE
 
-// The server's certificate is verified against the same CA the guest trusts: the configured
-// bundle, or else the built-in SwitchNet Local CA. This request carries the user's password, so
-// it is not sent to a server whose certificate does not check out.
-X509_STORE* BuildTrustStore() {
-    X509_STORE* store = X509_STORE_new();
-    if (!store) {
-        return nullptr;
-    }
-
-    const std::string& bundle = Settings::values.private_server_ca_bundle.GetValue();
-    if (!bundle.empty()) {
-        if (X509_STORE_load_locations(store, bundle.c_str(), nullptr) != 1) {
-            X509_STORE_free(store);
-            return nullptr;
-        }
-        return store;
-    }
-
-    const auto& pem = Service::SSL::SwitchNetLocalCaPem;
-    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
-    while (X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) {
-        X509_STORE_add_cert(store, cert);
-        X509_free(cert);
-    }
-    BIO_free(bio);
-    return store;
-}
-
 struct Endpoint {
     std::string host;
     int port = 443;
@@ -181,14 +152,8 @@ std::unique_ptr<httplib::SSLClient> MakeClient(const std::string& host, int time
     client->set_hostname_addr_map({{host, endpoint->host}});
     client->set_connection_timeout(timeout_seconds);
     client->set_read_timeout(timeout_seconds);
-    client->enable_server_certificate_verification(true);
-
-    X509_STORE* store = BuildTrustStore();
-    if (!store) {
-        ReportFailure("the CA to verify the server with could not be loaded");
-        return nullptr;
-    }
-    client->set_ca_cert_store(store); // owned by the client from here
+    Service::SSL::ConfigureSwitchNetTrust(
+        *client, Settings::values.private_server_ca_bundle.GetValue());
     return client;
 }
 
@@ -212,8 +177,9 @@ std::optional<Tokens> Login() {
 
     const auto response = client.Post("/login", form);
     if (!response) {
-        ReportFailure(fmt::format("could not reach {} at {}: {}", BaasHost, server,
-                                  httplib::to_string(response.error())));
+        ReportFailure(fmt::format("could not reach {} at {}: {} (TLS error {}, backend {:#x})",
+                                  BaasHost, server, httplib::to_string(response.error()),
+                                  response.ssl_error(), response.ssl_backend_error()));
         return std::nullopt;
     }
 
@@ -358,17 +324,34 @@ std::optional<std::string> GetAccessToken() {
     return cached_access_token;
 }
 
-std::optional<Response> Request(const std::string& method, const std::string& path,
+struct RequestSession::Impl {
+#ifdef ENABLE_WEB_SERVICE
+    std::unique_ptr<httplib::SSLClient> client;
+    std::string identity;
+#endif
+};
+
+RequestSession::RequestSession() : impl{std::make_unique<Impl>()} {}
+RequestSession::~RequestSession() = default;
+
+std::optional<Response> RequestSession::Request(const std::string& method, const std::string& path,
                                 const std::string& json_body) {
 #ifdef ENABLE_WEB_SERVICE
     const auto token = GetAccessToken();
     if (!token) {
         return std::nullopt;
     }
-    auto client = MakeClient(std::string{BaasHost}, 8);
-    if (!client) {
-        return std::nullopt;
+    const std::string identity = Settings::values.switchnet_server.GetValue() + "\n" +
+                                 Settings::values.private_server_ca_bundle.GetValue();
+    if (!impl->client || impl->identity != identity) {
+        impl->client = MakeClient(std::string{BaasHost}, 8);
+        impl->identity = identity;
+        if (!impl->client) {
+            return std::nullopt;
+        }
+        impl->client->set_keep_alive(true);
     }
+    auto& client = impl->client;
     const httplib::Headers headers{{"Authorization", "Bearer " + *token}};
     httplib::Result result;
     if (method == "GET") {
@@ -379,12 +362,23 @@ std::optional<Response> Request(const std::string& method, const std::string& pa
         result = client->Post(path, headers, json_body, "application/json");
     }
     if (!result) {
+        LOG_WARNING(Service_ACC, "GRID0+ API {} {} failed: {}", method, path,
+                    httplib::to_string(result.error()));
         return std::nullopt;
     }
-    return Response{result->status, result->body};
+    if (result->status < 200 || result->status >= 300) {
+        LOG_WARNING(Service_ACC, "GRID0+ API {} {} returned HTTP {}", method, path, result->status);
+    }
+    return Response{result->status, std::move(result->body)};
 #else
     return std::nullopt;
 #endif
+}
+
+std::optional<Response> Request(const std::string& method, const std::string& path,
+                                const std::string& json_body) {
+    RequestSession session;
+    return session.Request(method, path, json_body);
 }
 
 std::optional<std::string> Fetch(const std::string& url) {

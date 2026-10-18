@@ -460,12 +460,25 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                 out = patched->ReadAllBytes();
         }
     }
-    for (auto& patch : GetPrivateServerPatches(build_id)) {
-        LOG_INFO(Loader, "    - Applying GRID0+ private server patch");
+    const auto private_patches = GetPrivateServerPatches(build_id);
+    size_t applied_private_patches = 0;
+    for (const auto& patch : private_patches) {
+        const auto& patch_name = patch.name;
         const auto patched = PatchIPS(std::make_shared<VectorVfsFile>(out),
-                                      std::make_shared<VectorVfsFile>(std::move(patch)));
-        if (patched != nullptr)
+                                      std::make_shared<VectorVfsFile>(patch.bytes));
+        if (patched != nullptr) {
             out = patched->ReadAllBytes();
+            ++applied_private_patches;
+            LOG_INFO(Loader, "GRID0+ patch applied: {} build={} ips_bytes={}",
+                     patch_name, build_id, patch.bytes.size());
+        } else {
+            LOG_ERROR(Loader, "GRID0+ patch FAILED: {} build={} image_bytes={} ips_bytes={}",
+                      patch_name, build_id, out.size(), patch.bytes.size());
+        }
+    }
+    if (!private_patches.empty()) {
+        LOG_INFO(Loader, "GRID0+ patch summary: {}/{} applied to {} build={}",
+                 applied_private_patches, private_patches.size(), name, build_id);
     }
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;

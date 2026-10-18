@@ -3,16 +3,13 @@
 
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <optional>
 
 #include "common/polyfill_thread.h"
-
-namespace Core { class System; }
-
-namespace Kernel {
-class KEvent;
-}
 
 namespace Service::Sockets {
 
@@ -33,7 +30,7 @@ namespace Service::Sockets {
  */
 class DeferredPollWaker {
 public:
-    explicit DeferredPollWaker(Core::System& system_, Kernel::KEvent* deferral_event);
+    explicit DeferredPollWaker(std::function<void()> signal);
     ~DeferredPollWaker();
 
     DeferredPollWaker(const DeferredPollWaker&) = delete;
@@ -46,12 +43,14 @@ public:
     /// Something a deferred poll may be waiting on has happened; re-run them now.
     void Wake();
 
+    void WakeAt(std::chrono::steady_clock::time_point deadline);
+
 private:
     void Run(std::stop_token stop);
 
-    Core::System& system;
-    Kernel::KEvent* event;
+    std::function<void()> signal;
     std::mutex mutex;
+    std::optional<std::chrono::steady_clock::time_point> wake_deadline;
     std::condition_variable_any cv;
     int waiters = 0;
     std::jthread thread;

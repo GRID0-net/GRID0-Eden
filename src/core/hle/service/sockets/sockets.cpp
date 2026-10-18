@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <tuple>
+#include "core/core.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/deferred_poll_waker.h"
@@ -68,7 +70,8 @@ void LoopProcess(Core::System& system) {
 
     Kernel::KEvent* deferral_event{};
     server_manager->ManageDeferral(&deferral_event);
-    const auto waker = std::make_shared<DeferredPollWaker>(system, deferral_event);
+    const auto waker = std::make_shared<DeferredPollWaker>(
+        [&system, deferral_event] { deferral_event->Signal(system.Kernel()); });
     for (const auto& [name, is_user, sessions] :
          {std::tuple{"bsd:s", false, 0x7e}, {"bsd:u", true, 0x0f}, {"bsd:a", true, 0x17}}) {
         auto bsd = std::make_shared<BSD_USA>(system, name, is_user);
@@ -82,7 +85,9 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("ifcfg", std::make_shared<BSDCFG>(system, "ifcfg"));
     server_manager->RegisterNamedService("nsd:a", std::make_shared<NSD>(system, "nsd:a"));
     server_manager->RegisterNamedService("nsd:u", std::make_shared<NSD>(system, "nsd:u"));
-    server_manager->RegisterNamedService("sfdnsres", std::make_shared<SFDNSRES>(system), 30);
+    auto resolver = std::make_shared<SFDNSRES>(system);
+    resolver->SetDeferredPollWaker(waker);
+    server_manager->RegisterNamedService("sfdnsres", std::move(resolver), 30);
     server_manager->RegisterNamedService("dns:priv", std::make_shared<DNS_PRIV>(system));
     server_manager->RegisterNamedService("eth:nd", std::make_shared<ISfDriverServiceCreator>(system));
 

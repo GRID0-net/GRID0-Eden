@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -43,6 +44,20 @@ std::optional<std::string> GetAccessToken();
 struct Response {
     int status;
     std::string body;
+};
+
+/// One scoped, CA-verified HTTP connection for a sequence of emulator API requests.
+/// Owns no thread and closes when the transfer scope ends. Do not share across workers.
+class RequestSession {
+public:
+    RequestSession();
+    ~RequestSession();
+    std::optional<Response> Request(const std::string& method, const std::string& path,
+                                    const std::string& json_body = {});
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
 };
 
 /**

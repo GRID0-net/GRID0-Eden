@@ -387,6 +387,7 @@ Result ServerManager::CompleteSyncRequest(Session* session) {
         // Insert into deferred session list.
         std::scoped_lock ll{m_deferred_list_mutex};
         m_deferred_sessions.push_back(session);
+        session->GetContext()->NotifyDeferred();
 
         // Finish.
         R_SUCCEED();

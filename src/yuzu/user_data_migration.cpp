@@ -57,15 +57,13 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
     BUTTON(QCheckBox, clear_shaders, QObject::tr("Clear Shader Cache"), MigrationTooltipClearShader,
            true)
 
-    u32 id = 0;
-
-#define RADIO(name, text, tooltip, checkState)                                                     \
+#define RADIO(name, text, tooltip, checkState, strategy)                                          \
     BUTTON(QRadioButton, name, text, tooltip, checkState)                                          \
-    group->addButton(name, ++id);
+    group->addButton(name, static_cast<int>(MigrationWorker::MigrationStrategy::strategy));
 
-    RADIO(keep_old, QObject::tr("Keep Old Data"), MigrationTooltipKeepOld, true)
-    RADIO(clear_old, QObject::tr("Clear Old Data"), MigrationTooltipClearOld, false)
-    RADIO(link_old, QObject::tr("Link Old Directory"), MigrationTooltipLinkOld, false)
+    RADIO(keep_old, QObject::tr("Keep Old Data"), MigrationTooltipKeepOld, true, Copy)
+    RADIO(clear_old, QObject::tr("Clear Old Data"), MigrationTooltipClearOld, false, Move)
+    RADIO(link_old, QObject::tr("Link Old Directory"), MigrationTooltipLinkOld, false, Link)
 
 #undef RADIO
 #undef BUTTON
@@ -105,7 +103,7 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 
     QAbstractButton* button = migration_prompt.clickedButton();
 
-    if (button->text() == QObject::tr("No")) {
+    if (!button || button->text() == QObject::tr("No")) {
         return ShowMigrationCancelledMessage(main_window);
     }
 
@@ -152,6 +150,13 @@ void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clea
                         thread->quit();
                     });
 
+    thread->connect(worker, &MigrationWorker::error, progress,
+                    [=](const QString& message) {
+                        progress->close();
+                        QMessageBox::critical(main_window, QObject::tr("Migration failed"), message);
+                        thread->quit();
+                    });
+    thread->connect(worker, &MigrationWorker::error, worker, &QObject::deleteLater);
     thread->connect(worker, &MigrationWorker::finished, worker, &QObject::deleteLater);
     thread->connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 

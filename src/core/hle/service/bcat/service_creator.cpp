@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/hle/service/acc/switchnet_account.h"
 #include "core/hle/service/bcat/backend/grid0_backend.h"
@@ -44,11 +45,27 @@ IServiceCreator::IServiceCreator(Core::System& system_, const char* name_)
 
 IServiceCreator::~IServiceCreator() = default;
 
+void IServiceCreator::PrefetchDeliveryCache(u64 title_id) {
+    if (title_id == 0 || prefetched_title == title_id ||
+        !Service::Account::SwitchNet::IsConfigured() || Settings::values.airplane_mode.GetValue()) {
+        return;
+    }
+    // A console downloads BCAT independently of the game's explicit sync requests.
+    // Match Ryujinx's initial prefetch before exposing a delivery-cache view. Reuse
+    // this BCAT worker and the existing hash-checking backend; do not add a background thread.
+    LOG_INFO(Service_BCAT, "GRID0+: prefetching delivery cache for {:016X}", title_id);
+    ProgressServiceBackend progress{system, "GRID0+InitialSync"};
+    if (backend->Prefetch(system.Kernel(), {title_id, 0}, progress)) {
+        prefetched_title = title_id;
+    }
+}
+
 Result IServiceCreator::CreateBcatService(ClientProcessId process_id,
                                           OutInterface<IBcatService> out_interface) {
     LOG_INFO(Service_BCAT, "called, process_id={}", process_id.pid);
-    *out_interface =
-        std::make_shared<IBcatService>(system, *backend, system.ResolveCallerProgramId(*process_id));
+    const auto title_id = system.ResolveCallerProgramId(*process_id);
+    PrefetchDeliveryCache(title_id);
+    *out_interface = std::make_shared<IBcatService>(system, *backend, title_id);
     R_SUCCEED();
 }
 
@@ -57,6 +74,7 @@ Result IServiceCreator::CreateDeliveryCacheStorageService(
     LOG_INFO(Service_BCAT, "called, process_id={}", process_id.pid);
 
     const auto title_id = system.ResolveCallerProgramId(*process_id);
+    PrefetchDeliveryCache(title_id);
     *out_interface =
         std::make_shared<IDeliveryCacheStorageService>(system, fsc.GetBCATDirectory(title_id));
     R_SUCCEED();
@@ -65,6 +83,7 @@ Result IServiceCreator::CreateDeliveryCacheStorageService(
 Result IServiceCreator::CreateDeliveryCacheStorageServiceWithApplicationId(
     u64 application_id, OutInterface<IDeliveryCacheStorageService> out_interface) {
     LOG_DEBUG(Service_BCAT, "called, application_id={:016X}", application_id);
+    PrefetchDeliveryCache(application_id);
     *out_interface = std::make_shared<IDeliveryCacheStorageService>(
         system, fsc.GetBCATDirectory(application_id));
     R_SUCCEED();

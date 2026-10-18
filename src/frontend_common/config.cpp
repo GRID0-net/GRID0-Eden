@@ -75,24 +75,16 @@ void Config::WriteToIni() const {
         break;
     }
     LOG_INFO(Config, "Writing {} configuration to: {}", config_type, config_loc);
-    FILE* fp = nullptr;
-#ifdef _WIN32
-    fp = _wfopen(Common::UTF8ToUTF16W(config_loc).data(), L"wb");
-#else
-    fp = fopen(config_loc.c_str(), "wb");
-#endif
-
-    if (fp == nullptr) {
-        LOG_ERROR(Frontend, "Config file could not be saved!");
-        return;
+    try {
+        std::string contents;
+        if (config->Save(contents, false) < 0) {
+            LOG_ERROR(Frontend, "Config file could not be serialized!");
+            return;
+        }
+        config_file.Save(contents);
+    } catch (const std::exception& error) {
+        LOG_ERROR(Frontend, "Config file was not replaced: {}", error.what());
     }
-
-    CSimpleIniA::FileWriter writer(fp);
-    const SI_Error rc = config->Save(writer, false);
-    if (rc < 0) {
-        LOG_ERROR(Frontend, "Config file could not be saved!");
-    }
-    fclose(fp);
 }
 
 void Config::SetUpIni() {
@@ -100,28 +92,13 @@ void Config::SetUpIni() {
     config->SetUnicode(true);
     config->SetSpaces(false);
 
-    FILE* fp = nullptr;
-#ifdef _WIN32
-    _wfopen_s(&fp, Common::UTF8ToUTF16W(config_loc).data(), L"rb, ccs=UTF-8");
-    if (fp == nullptr) {
-        fp = _wfopen(Common::UTF8ToUTF16W(config_loc).data(), L"wb, ccs=UTF-8");
+    config_file = ConfigFile{};
+    ConfigFile loaded_file;
+    const auto contents = loaded_file.Load(std::filesystem::path(FS::ToU8String(config_loc)));
+    if (config->LoadData(contents.data(), contents.size()) < 0) {
+        throw ConfigFileError("Settings file could not be parsed; the original has been preserved.");
     }
-#else
-    fp = fopen(config_loc.c_str(), "rb");
-    if (fp == nullptr) {
-        fp = fopen(config_loc.c_str(), "wb");
-    }
-#endif
-
-    if (fp == nullptr) {
-        LOG_ERROR(Frontend, "Config file could not be loaded!");
-        return;
-    }
-
-    if (SI_Error rc = config->LoadFile(fp); rc < 0) {
-        LOG_ERROR(Frontend, "Config file could not be loaded!");
-    }
-    fclose(fp);
+    config_file = std::move(loaded_file);
 }
 
 bool Config::IsCustomConfig() const {

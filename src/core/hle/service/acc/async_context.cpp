@@ -61,7 +61,7 @@ void IAsyncContext::HasDone(HLERequestContext& ctx) {
 void IAsyncContext::GetResult(HLERequestContext& ctx) {
     LOG_DEBUG(Service_ACC, "called");
 
-    IPC::ResponseBuilder rb{ctx, 3};
+    IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(GetResult());
 }
 

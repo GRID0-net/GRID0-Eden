@@ -22,6 +22,7 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/hle/service/acc/acc.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/async_context.h"
 #include "core/hle/service/acc/errors.h"
 #include "core/hle/service/acc/profile_manager.h"
@@ -679,8 +680,13 @@ static u32 WriteSwitchNetIdToken(HLERequestContext& ctx) {
                   token->size(), ctx.CanWriteBuffer() ? ctx.GetWriteBufferSize() : 0);
         return 0;
     }
-    ctx.WriteBuffer(token->data(), token->size());
-    return static_cast<u32>(token->size());
+    const auto written = ctx.WriteBuffer(token->data(), token->size());
+    if (written != token->size()) {
+        LOG_ERROR(Service_ACC, "GRID0+: incomplete id token write ({} of {} bytes)", written,
+                  token->size());
+        return 0;
+    }
+    return static_cast<u32>(written);
 }
 
 class EnsureTokenIdCacheAsyncInterface final : public IAsyncContext {
@@ -710,6 +716,69 @@ protected:
     }
 };
 
+// 6.0.0+. Completes at once and reports an online-play subscription.
+class IAsyncNetworkServiceLicenseKindContext final
+    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
+public:
+    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_)
+        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"},
+          service_context{system_, "IAsyncNetworkServiceLicenseKindContext"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &IAsyncNetworkServiceLicenseKindContext::GetSystemEvent, "GetSystemEvent"},
+            {1, &IAsyncNetworkServiceLicenseKindContext::Cancel, "Cancel"},
+            {2, &IAsyncNetworkServiceLicenseKindContext::HasDone, "HasDone"},
+            {3, &IAsyncNetworkServiceLicenseKindContext::GetResult, "GetResult"},
+            {4, &IAsyncNetworkServiceLicenseKindContext::GetNetworkServiceLicenseKind, "GetNetworkServiceLicenseKind"},
+        };
+        // clang-format on
+
+        RegisterHandlers(functions);
+
+        completion_event =
+            service_context.CreateEvent("IAsyncNetworkServiceLicenseKindContext:Completion");
+        completion_event->Signal(system.Kernel());
+    }
+
+    ~IAsyncNetworkServiceLicenseKindContext() override {
+        service_context.CloseEvent(completion_event);
+    }
+
+private:
+    void GetSystemEvent(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, completion_event->GetReadableEvent());
+    }
+
+    void Cancel(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void HasDone(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(true);
+    }
+
+    void GetResult(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetNetworkServiceLicenseKind(HLERequestContext& ctx) {
+        // nn::account::NetworkServiceLicenseKind: 0 = none, 1 = subscribed.
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(1);
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event{};
+};
+
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
 public:
     explicit IManagerForApplication(Core::System& system_,
@@ -728,7 +797,7 @@ public:
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
             {150, nullptr, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
-            {170, nullptr, "LoadNetworkServiceLicenseKindAsync"},
+            {170, &IManagerForApplication::LoadNetworkServiceLicenseKindAsync, "LoadNetworkServiceLicenseKindAsync"},
         };
         // clang-format on
 
@@ -742,19 +811,23 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    u64 NetworkServiceAccountId() const {
+        if (SwitchNet::IsConfigured()) {
+            return SwitchNet::GetNetworkServiceAccountId().value_or(0);
+        }
+        return profile_manager->GetLastOpenedUser().Hash();
+    }
+
+    void LoadNetworkServiceLicenseKindAsync(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IAsyncNetworkServiceLicenseKindContext>(ctx, system);
+    }
+
     void GetAccountId(HLERequestContext& ctx) {
         LOG_DEBUG(Service_ACC, "called");
 
-        // Signed in to GRID0+, this is the account's network service account id: the id NPLN
-        // names this user by, and the owner of every friend relationship it sends. Splatoon 3
-        // fetched its friend list and then never looked at it (no presences, empty friend list)
-        // while this answered with a hash of the local profile instead.
-        u64 account_id = profile_manager->GetLastOpenedUser().Hash();
-        if (SwitchNet::IsConfigured()) {
-            if (const auto nsa = SwitchNet::GetNetworkServiceAccountId()) {
-                account_id = *nsa;
-            }
-        }
+        const auto account_id = NetworkServiceAccountId();
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
         rb.PushRaw<u64>(account_id);
@@ -786,10 +859,9 @@ private:
         LOG_DEBUG(Service_ACC, "called");
 
         const auto token_size = WriteSwitchNetIdToken(ctx);
-        IPC::ResponseBuilder rb{ctx, 4};
+        IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push(token_size);
-        rb.Push(0);
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
@@ -816,7 +888,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(NetworkServiceAccountId());
     }
 
     void StoreOpenContext(HLERequestContext& ctx) {
@@ -830,26 +902,6 @@ private:
 
     std::shared_ptr<EnsureTokenIdCacheAsyncInterface> ensure_token_id{};
     std::shared_ptr<ProfileManager> profile_manager;
-};
-
-// 6.0.0+
-class IAsyncNetworkServiceLicenseKindContext final
-    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
-public:
-    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_, Common::UUID)
-        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"} {
-        // clang-format off
-        static const FunctionInfo functions[] = {
-            {0, nullptr, "GetSystemEvent"},
-            {1, nullptr, "Cancel"},
-            {2, nullptr, "HasDone"},
-            {3, nullptr, "GetResult"},
-            {4, nullptr, "GetNetworkServiceLicenseKind"},
-        };
-        // clang-format on
-
-        RegisterHandlers(functions);
-    }
 };
 
 // 8.0.0+

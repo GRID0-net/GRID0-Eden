@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -19,6 +21,9 @@ enum class Errno : u32 {
     SUCCESS = 0,
     BADF = 9,
     AGAIN = 11,
+    ACCES = 13,
+    NOTTY = 25,
+    OPNOTSUPP = 95,
     INVAL = 22,
     MFILE = 24,
     AFNOSUPPORT = 97,
@@ -234,9 +239,11 @@ struct SockAddrIn {
     u8 family;
     u16 portno;
     std::array<u8, 4> ip;
-    std::array<u8, 248> zeroes;
+    std::array<u8, 8> zeroes;
 };
-static_assert(sizeof(SockAddrIn) == 0x100);
+static_assert(sizeof(SockAddrIn) == 0x10);
+static_assert(offsetof(SockAddrIn, portno) == 2);
+static_assert(offsetof(SockAddrIn, ip) == 4);
 
 enum class PollEvents : u16 {
     // Using Pascal case because IN is a macro on Windows.
