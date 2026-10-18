@@ -16,6 +16,8 @@ import struct
 import subprocess
 import tempfile
 
+from package_metadata import read_git_metadata
+
 
 MACHINES = {62: "x86_64", 183: "aarch64"}
 # The loader can be bundled separately; kernel graphics interfaces stay on the host.
@@ -68,6 +70,7 @@ def main():
     output = (args.output or build / "package" / f"GRID0-Eden-{arch}.AppImage").resolve()
     if output.exists():
         parser.error(f"Output already exists: {output}")
+    revision, dirty = read_git_metadata(root)
     directories = [path.resolve() for path in args.library_dir]
     directories += [sdk / path for path in [
         "usr/lib64", "lib64", "usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu",
@@ -222,8 +225,8 @@ esac
             "architecture": arch,
             "minimum_glibc": ".".join(map(str, required_glibc)),
             "bundled_glibc": args.bundle_glibc,
-            "revision": run("git", "-C", str(root), "rev-parse", "HEAD").strip(),
-            "uncommitted_changes": bool(run("git", "-C", str(root), "status", "--porcelain")),
+            "revision": revision,
+            "uncommitted_changes": dirty,
             "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
             "host_libraries": sorted(host_libraries),
             "imports": imports,

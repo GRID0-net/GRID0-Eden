@@ -827,7 +827,7 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     }
 
     for (PollFD& pollfd : fds) {
-        ASSERT(False(pollfd.revents));
+        pollfd.revents = PollEvents{};
 
         if (pollfd.fd >= static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
             LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
@@ -844,7 +844,7 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     }
 
     std::vector<Network::PollFD> host_pollfds(fds.size());
-    std::transform(fds.begin(), fds.end(), host_pollfds.begin(), [](PollFD pollfd) {
+    std::transform(fds.begin(), fds.end(), host_pollfds.begin(), [this](PollFD pollfd) {
         Network::PollFD result;
         result.socket = file_descriptors[pollfd.fd]->socket.get();
         result.events = Translate(pollfd.events);
@@ -1638,13 +1638,16 @@ void BSD_USA::BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const 
 }
 
 void BSD_USA::OnProxyPacketReceived(const Network::ProxyPacket& packet) {
-    for (auto& optional_descriptor : file_descriptors) {
-        if (!optional_descriptor.has_value()) {
+    std::lock_guard lock{fd_table_mutex};
+    std::vector<Network::SocketBase*> processed;
+    for (auto& descriptor : file_descriptors) {
+        if (!descriptor || !descriptor->socket) {
             continue;
         }
-        FileDescriptor& descriptor = *optional_descriptor;
-        if (descriptor.socket) {
-            descriptor.socket->HandleProxyPacket(packet);
+        auto* socket = descriptor->socket.get();
+        if (std::find(processed.begin(), processed.end(), socket) == processed.end()) {
+            socket->HandleProxyPacket(packet);
+            processed.push_back(socket);
         }
     }
 }

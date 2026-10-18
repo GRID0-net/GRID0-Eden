@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import tempfile
 
+from package_metadata import read_git_metadata
+
 
 SYSTEM_DLLS = set("""
 advapi32.dll authz.dll avrt.dll bcrypt.dll bcryptprimitives.dll cfgmgr32.dll combase.dll comctl32.dll
@@ -55,6 +57,7 @@ def main():
     output = (args.output or args.build_dir / "package/eden-grid0-windows-x86_64").resolve()
     if output.exists() or (args.zip and Path(str(output) + ".zip").exists()):
         parser.error(f"Output already exists: {output}")
+    revision, dirty = read_git_metadata(root)
     binaries = sorted((args.build_dir / "bin").glob("*.exe"))
     if not any(path.name == "eden.exe" for path in binaries):
         parser.error("Build eden.exe before packaging")
@@ -127,10 +130,6 @@ def main():
                     else:
                         shutil.copy2(notice, target)
         shutil.copy2(root / "cpmfile.json", stage / "cpmfile.json")
-        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                                  capture_output=True, text=True).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, check=True,
-                               capture_output=True, text=True).stdout != ""
         versions = {}
         for package in ["Qt6Core", "openssl", "sdl3", "libzstd"]:
             pc = sdk / "lib/pkgconfig" / (package + ".pc")

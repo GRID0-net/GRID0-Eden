@@ -71,6 +71,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Validate source checkout in container
+        env:
+          SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git status --porcelain
+
       - uses: actions/cache@v4
         with:
           path: .cache/cpm

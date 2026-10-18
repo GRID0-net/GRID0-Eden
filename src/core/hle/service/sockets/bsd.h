@@ -221,8 +221,8 @@ private:
     std::mutex deferred_polls_mutex;
     std::map<const HLERequestContext*, DeferredPoll> deferred_polls;
 
-    static inline std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
-    static inline std::mutex fd_table_mutex; // Protects access to the file_descriptors array
+    std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+    std::mutex fd_table_mutex; // Protects access to the file_descriptors array
 
 
     /// Callback to parse and handle a received wifi packet.
