@@ -54,10 +54,11 @@ Errno Translate(Network::Errno value) {
     case Network::Errno::DESTADDRREQ:
         return Errno::DESTADDRREQ;
     default:
-        // Never SUCCESS: a failed call reported as one returns -1 with errno 0, and Pia then
-        // waits on a send or receive that never happened instead of handling the error.
+        // SUCCESS, as upstream does. Returning INVAL here turned host errors the game tolerates
+        // (an unsupported setsockopt, WSAEALREADY on a non-blocking connect) into fatal ones and
+        // stopped players connecting. Errors that matter are mapped explicitly above.
         UNIMPLEMENTED_MSG("Unimplemented errno={}", value);
-        return Errno::INVAL;
+        return Errno::SUCCESS;
     }
 }
 
