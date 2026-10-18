@@ -43,9 +43,21 @@ Errno Translate(Network::Errno value) {
         return Errno::INPROGRESS;
     case Network::Errno::ISCONN:
         return Errno::ISCONN;
+    case Network::Errno::MSGSIZE:
+        return Errno::MSGSIZE;
+    case Network::Errno::NETDOWN:
+        return Errno::NETDOWN;
+    case Network::Errno::NETUNREACH:
+        return Errno::NETUNREACH;
+    case Network::Errno::HOSTUNREACH:
+        return Errno::HOSTUNREACH;
+    case Network::Errno::DESTADDRREQ:
+        return Errno::DESTADDRREQ;
     default:
+        // Never SUCCESS: a failed call reported as one returns -1 with errno 0, and Pia then
+        // waits on a send or receive that never happened instead of handling the error.
         UNIMPLEMENTED_MSG("Unimplemented errno={}", value);
-        return Errno::SUCCESS;
+        return Errno::INVAL;
     }
 }
 

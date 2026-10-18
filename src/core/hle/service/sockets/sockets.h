@@ -23,7 +23,10 @@ enum class Errno : u32 {
     MFILE = 24,
     AFNOSUPPORT = 97,
     PIPE = 32,
+    DESTADDRREQ = 89,
     MSGSIZE = 90,
+    NETDOWN = 100,
+    NETUNREACH = 101,
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
@@ -31,6 +34,7 @@ enum class Errno : u32 {
     CONNREFUSED = 111,
     INPROGRESS = 115,
     ISCONN = 106,
+    HOSTUNREACH = 113,
 };
 
 enum class GetAddrInfoError : s32 {
