@@ -1307,8 +1307,10 @@ std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> m
     const bool temporary_nonblock = (flags & Network::FLAG_MSG_DONTWAIT) != 0 &&
                                    (file_descriptors[fd]->flags & Network::FLAG_O_NONBLOCK) == 0;
     flags &= ~Network::FLAG_MSG_DONTWAIT;
+    // Ignore any other flag, as before: refusing them with EINVAL failed sends that always worked.
     if (flags != 0) {
-        return {-1, Errno::INVAL};
+        LOG_DEBUG(Service, "Ignoring send flags={:#x} on fd={}", flags, fd);
+        flags = 0;
     }
     if (temporary_nonblock) {
         const auto error = socket->SetNonBlock(true);
@@ -1349,8 +1351,10 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
     const bool temporary_nonblock = (flags & Network::FLAG_MSG_DONTWAIT) != 0 &&
                                    (file_descriptors[fd]->flags & Network::FLAG_O_NONBLOCK) == 0;
     flags &= ~Network::FLAG_MSG_DONTWAIT;
+    // Ignore any other flag, as before: refusing them with EINVAL failed sends that always worked.
     if (flags != 0) {
-        return {-1, Errno::INVAL};
+        LOG_DEBUG(Service, "Ignoring send flags={:#x} on fd={}", flags, fd);
+        flags = 0;
     }
     if (temporary_nonblock) {
         const auto error = socket->SetNonBlock(true);
